@@ -1,21 +1,58 @@
-// streamlinewebapps-proxy v31 — major rebrand: violet+gold palette, how-it-works, testimonials, FAQ, toasts, admin
+// streamlinewebapps-proxy v32 — security hardening: ADMIN_PIN→env, CORS allowlist, security headers, real /robots /sitemap, 404 handler, real /stats from DB, Resend verified sender, idempotency, admin XSS fix, og tags
 const SUPABASE = "https://huvfgenbcaiicatvtxak.supabase.co/functions/v1/streamline";
 const SUPA_REST = "https://huvfgenbcaiicatvtxak.supabase.co/rest/v1";
 const SUPA_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh1dmZnZW5iY2FpaWNhdHZ0eGFrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2MTczNjIsImV4cCI6MjA5MTE5MzM2Mn0.uTgzTKYjJnkFlRUIhGfW4ODKyV24xOdKaX7lxpDuMfc";
 const SUPA_H = {"apikey": SUPA_ANON, "Authorization": "Bearer "+SUPA_ANON, "Content-Type": "application/json"};
-const CORS = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET,POST,OPTIONS", "Access-Control-Allow-Headers": "Content-Type,Authorization"};
-const ADMIN_PIN = "535554";
+const ALLOWED_ORIGINS = new Set([
+  "https://streamlinewebapps.com",
+  "https://www.streamlinewebapps.com",
+  "http://localhost:3000",
+  "http://localhost:8787"
+]);
+function corsFor(req) {
+  const origin = req.headers.get("Origin") || "";
+  const allow = ALLOWED_ORIGINS.has(origin) ? origin : "https://streamlinewebapps.com";
+  return {
+    "Access-Control-Allow-Origin": allow,
+    "Vary": "Origin",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type,Authorization"
+  };
+}
+// Legacy CORS shim (kept so existing code paths don't break before refactor)
+const CORS = {"Access-Control-Allow-Origin": "https://streamlinewebapps.com", "Vary":"Origin", "Access-Control-Allow-Methods": "GET,POST,OPTIONS", "Access-Control-Allow-Headers": "Content-Type,Authorization"};
+const SEC_HEADERS = {
+  "Strict-Transport-Security": "max-age=31536000; includeSubDomains; preload",
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "Referrer-Policy": "strict-origin-when-cross-origin",
+  "Permissions-Policy": "geolocation=(), microphone=(), camera=(), payment=(self \"https://checkout.stripe.com\")",
+  "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline' https://js.stripe.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: https:; connect-src 'self' https://huvfgenbcaiicatvtxak.supabase.co https://api.stripe.com; frame-src https://checkout.stripe.com https://js.stripe.com; base-uri 'self'; form-action 'self' https://checkout.stripe.com"
+};
+function htmlEscape(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");}
+
 
 const _rl = new Map();
+const _idem = new Map(); // sub-second idempotency: hash -> {until, response}
 function rateOk(ip, key, max, windowMs=60000) {
   const k = ip+":"+key, now = Date.now();
+  // prune expired
+  if (_rl.size > 5000) {
+    for (const [kk,vv] of _rl) if (now > vv.r) _rl.delete(kk);
+  }
   let w = _rl.get(k);
   if (!w || now > w.r) w = {c:0, r:now+windowMs};
   w.c++; _rl.set(k,w);
   return w.c <= max;
 }
+async function idemKey(email, title) {
+  const data = new TextEncoder().encode((email||"").toLowerCase()+"|"+(title||"").toLowerCase());
+  const h = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(h)).map(b=>b.toString(16).padStart(2,"0")).join("").slice(0,32);
+}
+function idemPrune(){const n=Date.now();for(const[k,v]of _idem)if(n>v.until)_idem.delete(k);}
 
-const API_ROUTES = ["/ideas", "/stats", "/vote", "/chat"];
+const API_ROUTES = ["/ideas", "/vote", "/chat"]; // /stats now served from DB locally
 const STRIPE_PRICES = { Standard: "price_1TNvyJAm8bVflPN0GBi8u30C", Priority: "price_1TNvyJAm8bVflPN0Nerezgrs", Equity: "price_1TNvyKAm8bVflPN0rZqZZdgq" };
 
 async function handleSubmit(request, env) {
@@ -25,6 +62,14 @@ async function handleSubmit(request, env) {
   if (!title || !name || !email || !description || !tier) return new Response(JSON.stringify({error:"Missing required fields"}), {status:400, headers:{...CORS,"Content-Type":"application/json"}});
   const priceId = STRIPE_PRICES[tier];
   if (!priceId) return new Response(JSON.stringify({error:"Invalid tier"}), {status:400, headers:{...CORS,"Content-Type":"application/json"}});
+
+  // 60s idempotency window: same email+title within 60s returns prior response
+  idemPrune();
+  const ikey = await idemKey(email, title);
+  const prev = _idem.get(ikey);
+  if (prev) {
+    return new Response(prev.response, {headers:{...CORS,"Content-Type":"application/json","X-Idempotent":"replay"}});
+  }
 
   let submissionId;
   try {
@@ -73,19 +118,20 @@ async function handleSubmit(request, env) {
       method: "POST",
       headers: {"Authorization": "Bearer "+env.RESEND_KEY, "Content-Type": "application/json"},
       body: JSON.stringify({
-        from: "Streamline <hello@streamlinewebapps.com>",
+        from: "Streamline <noreply@luckdragon.io>",
+        reply_to: "hello@streamlinewebapps.com",
         to: ["pgallivan@outlook.com"],
         subject: "New submission: \""+title+"\" ("+tier+")",
         html: "<div style='font-family:Inter,sans-serif;max-width:560px;padding:32px 24px'>"+
           "<h2 style='color:#1e1b4b;margin:0 0 16px'>New idea submitted</h2>"+
           "<table style='font-size:14px;color:#4c4885;border-collapse:collapse;width:100%'>"+
-          "<tr><td style='padding:6px 0;font-weight:600;width:120px'>Title</td><td>"+title+"</td></tr>"+
-          "<tr><td style='padding:6px 0;font-weight:600'>Tier</td><td>"+tier+"</td></tr>"+
-          "<tr><td style='padding:6px 0;font-weight:600'>Category</td><td>"+(category||"Utility")+"</td></tr>"+
-          "<tr><td style='padding:6px 0;font-weight:600'>Name</td><td>"+name+"</td></tr>"+
-          "<tr><td style='padding:6px 0;font-weight:600'>Email</td><td>"+email+"</td></tr>"+
-          "<tr><td style='padding:6px 0;font-weight:600'>Phone</td><td>"+(phone||"n/a")+"</td></tr>"+
-          "<tr><td style='padding:6px 0;font-weight:600;vertical-align:top'>Description</td><td>"+description+"</td></tr>"+
+          "<tr><td style='padding:6px 0;font-weight:600;width:120px'>Title</td><td>"+htmlEscape(title)+"</td></tr>"+
+          "<tr><td style='padding:6px 0;font-weight:600'>Tier</td><td>"+htmlEscape(tier)+"</td></tr>"+
+          "<tr><td style='padding:6px 0;font-weight:600'>Category</td><td>"+htmlEscape(category||"Utility")+"</td></tr>"+
+          "<tr><td style='padding:6px 0;font-weight:600'>Name</td><td>"+htmlEscape(name)+"</td></tr>"+
+          "<tr><td style='padding:6px 0;font-weight:600'>Email</td><td>"+htmlEscape(email)+"</td></tr>"+
+          "<tr><td style='padding:6px 0;font-weight:600'>Phone</td><td>"+htmlEscape(phone||"n/a")+"</td></tr>"+
+          "<tr><td style='padding:6px 0;font-weight:600;vertical-align:top'>Description</td><td>"+htmlEscape(description)+"</td></tr>"+
           "</table>"+
           "<p style='margin:20px 0 0;font-size:13px;color:#9490c0'>Awaiting payment &middot; Submission ID: "+(submissionId||"?")+"</p>"+
           "</div>"
@@ -96,23 +142,26 @@ async function handleSubmit(request, env) {
       method: "POST",
       headers: {"Authorization": "Bearer "+env.RESEND_KEY, "Content-Type": "application/json"},
       body: JSON.stringify({
-        from: "Streamline <hello@streamlinewebapps.com>",
+        from: "Streamline <noreply@luckdragon.io>",
+        reply_to: "hello@streamlinewebapps.com",
         to: [email],
         subject: "Complete your submission: \""+title+"\"",
         html: "<div style='font-family:Inter,sans-serif;max-width:560px;margin:0 auto;padding:40px 24px'>"+
           "<div style='width:40px;height:40px;background:linear-gradient(135deg,#6d28d9,#7c3aed);border-radius:10px;display:flex;align-items:center;justify-content:center;margin-bottom:24px'>"+
           "<span style='color:#fff;font-weight:800;font-size:18px'>S</span></div>"+
-          "<h1 style='font-size:24px;font-weight:800;color:#1e1b4b;margin:0 0 8px'>You&#39;re one step away, "+firstName+"</h1>"+
-          "<p style='color:#4c4885;font-size:15px;line-height:1.6;margin:0 0 28px'>Your idea <strong style='color:#1e1b4b'>"+title+"</strong> is saved. Complete your payment to start the build.</p>"+
+          "<h1 style='font-size:24px;font-weight:800;color:#1e1b4b;margin:0 0 8px'>You&#39;re one step away, "+htmlEscape(firstName)+"</h1>"+
+          "<p style='color:#4c4885;font-size:15px;line-height:1.6;margin:0 0 28px'>Your idea <strong style='color:#1e1b4b'>"+htmlEscape(title)+"</strong> is saved. Complete your payment to start the build.</p>"+
           "<a href='"+checkoutUrl+"' style='display:inline-block;background:#6d28d9;color:#fff;padding:14px 28px;border-radius:10px;text-decoration:none;font-weight:700;font-size:15px;margin-bottom:28px'>Complete Payment &rarr;</a>"+
-          "<p style='color:#9490c0;font-size:13px;margin:0'>Tier: "+tier+" &middot; Category: "+(category||"Utility")+"<br>Once confirmed, we&#39;ll be in touch within 48 hours.</p>"+
+          "<p style='color:#9490c0;font-size:13px;margin:0'>Tier: "+htmlEscape(tier)+" &middot; Category: "+htmlEscape(category||"Utility")+"<br>Once confirmed, we&#39;ll be in touch within 48 hours.</p>"+
           "<hr style='border:none;border-top:1px solid #e0ddf5;margin:28px 0'>"+
           "<p style='color:#9490c0;font-size:12px;margin:0'>Streamline &middot; Melbourne, Australia &middot; <a href='https://www.streamlinewebapps.com' style='color:#6d28d9'>streamlinewebapps.com</a></p></div>"
       })
     }).catch(()=>{});
   }
 
-  return new Response(JSON.stringify({checkout: checkoutUrl}), {headers:{...CORS,"Content-Type":"application/json"}});
+  const respBody = JSON.stringify({checkout: checkoutUrl});
+  _idem.set(ikey, {until: Date.now()+60000, response: respBody});
+  return new Response(respBody, {headers:{...CORS,"Content-Type":"application/json"}});
 }
 
 async function handleAnalytics(request) {
@@ -125,9 +174,11 @@ async function handleAnalytics(request) {
   return new Response("ok", {headers: CORS});
 }
 
-async function handleAdminData(request) {
+async function handleAdminData(request, env) {
   const url = new URL(request.url);
-  if (url.searchParams.get("pin") !== ADMIN_PIN) return new Response(JSON.stringify({error:"Unauthorized"}), {status:401, headers:{...CORS,"Content-Type":"application/json"}});
+  const expected = (env && env.ADMIN_PIN) ? env.ADMIN_PIN : null;
+  const got = url.searchParams.get("pin");
+  if (!expected || !got || got !== expected) return new Response(JSON.stringify({error:"Unauthorized"}), {status:401, headers:{...CORS,"Content-Type":"application/json"}});
   const [subs, ideas] = await Promise.all([
     fetch(SUPA_REST+"/streamline_submissions?order=created_at.desc&limit=100", {headers: SUPA_H}).then(r=>r.json()).catch(()=>[]),
     fetch(SUPA_REST+"/streamline_ideas?order=created_at.desc&limit=100", {headers: SUPA_H}).then(r=>r.json()).catch(()=>[])
@@ -140,13 +191,34 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    if (request.method === "OPTIONS") return new Response(null, {status:204, headers:CORS});
-    if (path === "/health") return new Response(JSON.stringify({ok:true,version:29}), {headers:{...CORS,"Content-Type":"application/json"}});
-    if (path === "/privacy") return new Response(PRIVACY_HTML, {headers:{"Content-Type":"text/html;charset=utf-8","Cache-Control":"public,max-age=86400"}});
-    if (path === "/terms") return new Response(TERMS_HTML, {headers:{"Content-Type":"text/html;charset=utf-8","Cache-Control":"public,max-age=86400"}});
-    if (path === "/refunds") return new Response(REFUNDS_HTML, {headers:{"Content-Type":"text/html;charset=utf-8","Cache-Control":"public,max-age=86400"}});
-    if (path === "/admin") return new Response(ADMIN_HTML, {headers:{"Content-Type":"text/html;charset=utf-8"}});
-    if (path === "/admin/data") return handleAdminData(request);
+    const cors = corsFor(request);
+    if (request.method === "OPTIONS") return new Response(null, {status:204, headers:cors});
+    if (path === "/health") return new Response(JSON.stringify({ok:true,version:32,sha:"hardening-2026-05-06"}), {headers:{...cors,...SEC_HEADERS,"Content-Type":"application/json"}});
+    if (path === "/robots.txt") return new Response("User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /admin/\nDisallow: /analytics\nSitemap: https://streamlinewebapps.com/sitemap.xml\n", {headers:{"Content-Type":"text/plain;charset=utf-8","Cache-Control":"public,max-age=3600",...SEC_HEADERS}});
+    if (path === "/sitemap.xml") return new Response('<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n  <url><loc>https://streamlinewebapps.com/</loc><priority>1.0</priority></url>\n  <url><loc>https://streamlinewebapps.com/privacy</loc><priority>0.4</priority></url>\n  <url><loc>https://streamlinewebapps.com/terms</loc><priority>0.4</priority></url>\n  <url><loc>https://streamlinewebapps.com/refunds</loc><priority>0.4</priority></url>\n</urlset>\n', {headers:{"Content-Type":"application/xml;charset=utf-8","Cache-Control":"public,max-age=3600",...SEC_HEADERS}});
+    if (path === "/stats" && request.method === "GET") {
+      // Real stats from DB, replaces the upstream proxy
+      try {
+        const [subs, ideas] = await Promise.all([
+          fetch(SUPA_REST+"/streamline_submissions?select=status,tier&limit=1000",{headers:SUPA_H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+          fetch(SUPA_REST+"/streamline_ideas?select=status,revenue&limit=1000",{headers:SUPA_H}).then(r=>r.ok?r.json():[]).catch(()=>[])
+        ]);
+        const paid = (Array.isArray(subs)?subs:[]).filter(s=>s.status==="paid").length;
+        const live = (Array.isArray(ideas)?ideas:[]).filter(i=>i.status==="live").length;
+        const building = (Array.isArray(ideas)?ideas:[]).filter(i=>i.status==="building").length;
+        const monthly = (Array.isArray(ideas)?ideas:[]).reduce((a,i)=>a+Number(i.revenue||0),0);
+        // paid_out = 25% commission on monthly (rough lifetime estimate placeholder)
+        const paid_out = Math.round(monthly*0.25);
+        return new Response(JSON.stringify({live,building,monthly,paid_out,paid_subs:paid}),{headers:{...cors,...SEC_HEADERS,"Content-Type":"application/json","Cache-Control":"public,max-age=60"}});
+      } catch(e) {
+        return new Response(JSON.stringify({live:0,building:0,monthly:0,paid_out:0,error:"stats_fallback"}),{headers:{...cors,...SEC_HEADERS,"Content-Type":"application/json"}});
+      }
+    }
+    if (path === "/privacy") return new Response(PRIVACY_HTML, {headers:{...SEC_HEADERS,"Content-Type":"text/html;charset=utf-8","Cache-Control":"public,max-age=86400"}});
+    if (path === "/terms") return new Response(TERMS_HTML, {headers:{...SEC_HEADERS,"Content-Type":"text/html;charset=utf-8","Cache-Control":"public,max-age=86400"}});
+    if (path === "/refunds") return new Response(REFUNDS_HTML, {headers:{...SEC_HEADERS,"Content-Type":"text/html;charset=utf-8","Cache-Control":"public,max-age=86400"}});
+    if (path === "/admin") return new Response(ADMIN_HTML, {headers:{...SEC_HEADERS,"Content-Type":"text/html;charset=utf-8","X-Robots-Tag":"noindex,nofollow"}});
+    if (path === "/admin/data") return handleAdminData(request, env);
     if (path === "/analytics" && request.method === "POST") return handleAnalytics(request);
 
     if (path === "/submit" && request.method === "POST") {
@@ -170,9 +242,25 @@ export default {
       } catch(e) { return new Response(JSON.stringify({error:"Upstream error"}), {status:502, headers:{...CORS,"Content-Type":"application/json"}}); }
     }
 
-    return new Response(HTML, {status:200, headers:{"Content-Type":"text/html;charset=utf-8","Cache-Control":"public,s-maxage=300,stale-while-revalidate=60"}});
+    // Only the root path returns the homepage HTML. All other unknown paths get a real 404.
+    if (path === "/" || path === "/index.html") {
+      return new Response(HTML, {status:200, headers:{...SEC_HEADERS,"Content-Type":"text/html;charset=utf-8","Cache-Control":"public,s-maxage=300,stale-while-revalidate=60"}});
+    }
+    return new Response(NOT_FOUND_HTML, {status:404, headers:{...SEC_HEADERS,"Content-Type":"text/html;charset=utf-8","Cache-Control":"no-store"}});
   }
 };
+
+const NOT_FOUND_HTML = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>404 — Streamline</title>
+<meta name="robots" content="noindex"/>
+<style>body{font-family:Inter,sans-serif;background:#f8f7ff;color:#1e1b4b;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;text-align:center;padding:20px}
+.box{max-width:440px}
+h1{font-family:Syne,sans-serif;font-size:84px;margin:0 0 8px;background:linear-gradient(135deg,#6d28d9,#7c3aed);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+h2{font-family:Syne,sans-serif;font-size:24px;font-weight:800;margin:0 0 12px}
+p{color:#4c4885;line-height:1.6;margin:0 0 28px}
+a{display:inline-block;background:linear-gradient(135deg,#6d28d9,#7c3aed);color:#fff;padding:14px 28px;border-radius:10px;text-decoration:none;font-weight:700;box-shadow:0 4px 14px rgba(109,40,217,.3)}</style></head>
+<body><div class="box"><h1>404</h1><h2>Page not found</h2><p>The page you're looking for doesn't exist or has moved.</p><a href="/">Back to Streamline →</a></div></body></html>`;
+
 
 
 const PRIVACY_HTML = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Privacy Policy — Streamline</title>
@@ -655,17 +743,18 @@ function renderDash(d){
     "<div class='stat-box'><div class='val'>"+paid+"</div><div class='lbl'>Paid submissions</div></div>"+
     "<div class='stat-box'><div class='val'>"+ideas.length+"</div><div class='lbl'>Ideas in DB</div></div>"+
     "<div class='stat-box'><div class='val'>"+ideas.filter(function(x){return x.status==="live";}).length+"</div><div class='lbl'>Live apps</div></div>";
+  function esc(v){return String(v==null?"":v).replace(/[&<>"']/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c];});}
   var sh="<table><tr><th>ID</th><th>Title</th><th>Name</th><th>Email</th><th>Tier</th><th>Status</th><th>Date</th></tr>";
   subs.slice(0,50).forEach(function(s){
     var bc=s.status==="paid"?"b-paid":s.status==="awaiting_payment"?"b-await":"b-pending";
-    sh+="<tr><td>"+s.id+"</td><td>"+s.title+"</td><td>"+s.name+"</td><td>"+s.email+"</td><td>"+s.tier+"</td><td><span class='badge "+bc+"'>"+s.status+"</span></td><td>"+(s.created_at||"").slice(0,10)+"</td></tr>";
+    sh+="<tr><td>"+esc(s.id)+"</td><td>"+esc(s.title)+"</td><td>"+esc(s.name)+"</td><td>"+esc(s.email)+"</td><td>"+esc(s.tier)+"</td><td><span class='badge "+bc+"'>"+esc(s.status)+"</span></td><td>"+esc((s.created_at||"").slice(0,10))+"</td></tr>";
   });
   sh+="</table>";
   document.getElementById("subs-table").innerHTML=sh;
   var ih="<table><tr><th>ID</th><th>Title</th><th>Category</th><th>Votes</th><th>Status</th><th>Revenue/mo</th></tr>";
   ideas.slice(0,50).forEach(function(x){
     var bc=x.status==="live"?"b-paid":x.status==="building"?"b-pending":"b-await";
-    ih+="<tr><td>"+x.id+"</td><td>"+x.title+"</td><td>"+(x.category||"—")+"</td><td>"+x.votes+"</td><td><span class='badge "+bc+"'>"+x.status+"</span></td><td>"+(x.monthly_revenue?("$"+x.monthly_revenue):"—")+"</td></tr>";
+    ih+="<tr><td>"+esc(x.id)+"</td><td>"+esc(x.title)+"</td><td>"+esc(x.category||"—")+"</td><td>"+esc(x.votes)+"</td><td><span class='badge "+bc+"'>"+esc(x.status)+"</span></td><td>"+(x.revenue?("$"+esc(x.revenue)):"—")+"</td></tr>";
   });
   ih+="</table>";
   document.getElementById("ideas-table").innerHTML=ih;
@@ -677,6 +766,16 @@ function renderDash(d){
 const HTML = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Streamline — Submit an idea. We build it. You earn forever.</title>
 <meta name="description" content="Turn your app idea into recurring revenue. We build with AI, you earn 25% of every sale — forever."/>
+<link rel="canonical" href="https://streamlinewebapps.com/"/>
+<meta property="og:title" content="Streamline — Submit an idea. We build it. You earn forever."/>
+<meta property="og:description" content="Turn your app idea into recurring revenue. We build with AI, you earn 25% of every sale — forever."/>
+<meta property="og:url" content="https://streamlinewebapps.com/"/>
+<meta property="og:type" content="website"/>
+<meta property="og:image" content="https://streamlinewebapps.com/og.png"/>
+<meta name="twitter:card" content="summary_large_image"/>
+<meta name="twitter:title" content="Streamline — Submit an idea. We build it. You earn forever."/>
+<meta name="twitter:description" content="Turn your app idea into recurring revenue. We build with AI, you earn 25% of every sale — forever."/>
+<meta name="twitter:image" content="https://streamlinewebapps.com/og.png"/>
 <link rel="preconnect" href="https://fonts.googleapis.com"/><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet"/>
 <style>
@@ -1315,7 +1414,7 @@ async function loadIdeas(){
     var r=await fetch("/ideas");
     var d=await r.json();
     if(!d||!d.ideas||!d.ideas.length){document.getElementById("ideas").innerHTML="<p style=\"color:var(--ink-3);font-size:14px\">No ideas yet — be the first to submit!</p>";return;}
-    renderIdeas(d.ideas.map(function(x){return{id:x.id,title:x.title,desc:x.description||"",cat:x.category||"Utility",emoji:x.emoji||"💡",votes:x.votes||0,status:x.status||"queued",rev:x.monthly_revenue||0};}));
+    renderIdeas(d.ideas.map(function(x){return{id:x.id,title:x.title,desc:x.description||"",cat:x.category||"Utility",emoji:x.emoji||"💡",votes:x.votes||0,status:x.status||"queued",rev:x.revenue||0};}));
   }catch(e){document.getElementById("ideas").innerHTML="<p style=\"color:var(--ink-3);font-size:14px\">Could not load ideas.</p>";}
 }
 
