@@ -499,7 +499,7 @@ export default {
         return Response.json({ error: 'Forbidden' }, { status: 403, headers: cors });
       }
       try {
-        const APIN = env.AGENT_PIN;
+        const APIN = await getPin(env);
         const [agentRes, wfRes, toolsRes] = await Promise.allSettled([
           fetch('https://falkor-agent.luckdragon.io/health', { headers: { 'X-Pin': APIN } }).then(r => r.json()),
           fetch('https://falkor-workflows.luckdragon.io/health', { headers: { 'X-Pin': APIN } }).then(r => r.json()),
