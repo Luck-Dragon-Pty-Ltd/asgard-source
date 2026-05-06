@@ -1132,13 +1132,6 @@ const HTML = `<!DOCTYPE html>
       <button id="xc-auto-mode-btn" class="btn btn-secondary btn-sm"
         style="width:100%;border-radius:0;border-left:none;border-right:none;border-top:none;padding:8px;font-size:.8rem"
         onclick="xcStartAutoMode()">🎯 Switch to Auto-Detect (no tapping)</button>
-      <!-- Big tap button — always visible, always tappable -->
-      <button class="btn-tap" id="marshal-tap-btn" onclick="marshalTap()"
-        style="flex-shrink:0;border-radius:0;margin:0;width:100%">
-        <span class="tap-main" id="marshal-clock-mini">0:00.00</span>
-        <span class="tap-sub">TAP FINISH</span>
-      </button>
-
       <!-- Finisher list -->
       <div style="flex:1;overflow-y:auto;padding:10px 16px" id="marshal-finishes-wrap">
         <div id="marshal-finishes-list"></div>
@@ -1179,6 +1172,12 @@ const HTML = `<!DOCTYPE html>
         </div>
         <button class="btn btn-secondary btn-sm" style="width:100%;max-width:280px;margin-top:8px" onclick="bibSkip()">Skip — bib unknown</button>
       </div>
+      <!-- Big tap button — always at bottom (thumb zone), tappable even while bib pad is open -->
+      <button class="btn-tap" id="marshal-tap-btn" onclick="marshalTap()"
+        style="flex-shrink:0;border-radius:0;margin:0;width:100%">
+        <span class="tap-main" id="marshal-clock-mini">0:00.00</span>
+        <span class="tap-sub" id="marshal-tap-sub">TAP FINISH</span>
+      </button>
     </div>
   </div>
 </div>
@@ -3115,6 +3114,7 @@ async function marshalTap() {
 
   // Queue bib entry
   bibPendingQueue.push({ key, place, elapsed });
+  updateTapBtnLabel();
   if (!bibPendingKey) showNextBib();
 }
 
@@ -3211,6 +3211,14 @@ function xcStartAutoConfirmCountdown(detectedBib) {
 function hideBibPad() {
   document.getElementById('marshal-bib-pad').classList.add('hidden');
   bibPendingKey = null;
+  updateTapBtnLabel();
+}
+
+function updateTapBtnLabel() {
+  const sub = document.getElementById('marshal-tap-sub');
+  if (!sub) return;
+  const n = bibPendingQueue.length;
+  sub.textContent = n > 0 ? \`TAP FINISH  ·  +\${n} queued\` : 'TAP FINISH';
 }
 
 function bibDigit(d) {
@@ -3240,12 +3248,14 @@ async function bibConfirm() {
   bibPendingQueue.shift();
   bibPendingKey = null;
   showNextBib();
+  updateTapBtnLabel();
 }
 
 function bibSkip() {
   bibPendingQueue.shift();
   bibPendingKey = null;
   showNextBib();
+  updateTapBtnLabel();
 }
 
 function marshalEditBib(key, place, elapsed) {
