@@ -2066,7 +2066,7 @@ function enterRole(role) {
   if (role === 'starter') { showScreen('starter');     initStarterView();    return; }
   if (role === 'observer'){ showScreen('observer');    initObserverView();   return; }
   if (role === 'marshal') { showScreen('marshal');     initMarshalView();    return; }
-  if (role === 'admin-xc'){ showScreen('admin-xc');   initXCAdminView();    return; }
+  if (role === 'admin-xc'){ _checkAdminPin(() => { showScreen('admin-xc'); initXCAdminView(); }); return; }
   if (role === 'observer-xc'){ showScreen('observer-xc'); initXCObserverView(); return; }
   if (role === 'results')      { showScreen('results');      initResultsView();   return; }
   if (role === 'video-finish') { showScreen('video-finish'); initVideoFinish();   return; }
