@@ -1,10 +1,10 @@
-// asgard-tools v1.3.0
+// asgard-tools v1.4.0
 // Agentic tool-calling worker — gives Claude in Asgard real infrastructure access
-// v1.3.0: all Claude calls via CF AI Gateway (no direct Anthropic), /brief endpoint added
+// v1.4.0: fix /brief PIN split (AGENT_PIN for falkor-* health, AI_PIN for asgard-ai)
 // Deploy as worker script name: asgard-tools
 // Required bindings: CF_API_TOKEN (secret, optional — falls back to vault)
 
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 const ACCOUNT_ID = 'a6f47c17811ee2f8b6caeb8f38768c20';
 
 const SYSTEM_PROMPT = `You are Asgard, Luck Dragon's infrastructure AI. You have REAL tools — when Paddy asks you to change something, you actually do it. Don't describe what to do; do it.
@@ -499,11 +499,12 @@ export default {
         return Response.json({ error: 'Forbidden' }, { status: 403, headers: cors });
       }
       try {
-        const APIN = await getPin(env);
+        const AGENT_PIN = env.AGENT_PIN;      // falkor-* workers auth with AGENT_PIN
+        const AI_PIN = await getPin(env);        // asgard-ai auth with PADDY_PIN
         const [agentRes, wfRes, toolsRes] = await Promise.allSettled([
-          fetch('https://falkor-agent.luckdragon.io/health', { headers: { 'X-Pin': APIN } }).then(r => r.json()),
-          fetch('https://falkor-workflows.luckdragon.io/health', { headers: { 'X-Pin': APIN } }).then(r => r.json()),
-          fetch('https://falkor-brain.luckdragon.io/health', { headers: { 'X-Pin': APIN } }).then(r => r.json())
+          fetch('https://falkor-agent.luckdragon.io/health', { headers: { 'X-Pin': AGENT_PIN } }).then(r => r.json()),
+          fetch('https://falkor-workflows.luckdragon.io/health', { headers: { 'X-Pin': AGENT_PIN } }).then(r => r.json()),
+          fetch('https://falkor-brain.luckdragon.io/health', { headers: { 'X-Pin': AGENT_PIN } }).then(r => r.json())
         ]);
         const agentHealth = agentRes.status === 'fulfilled' ? agentRes.value : { error: 'unreachable' };
         const wfHealth = wfRes.status === 'fulfilled' ? wfRes.value : { error: 'unreachable' };
@@ -517,7 +518,7 @@ export default {
           '\nBrain: ' + JSON.stringify(brainHealth);
         const llmRes = await fetch('https://asgard-ai.luckdragon.io/chat/smart', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Pin': APIN },
+          headers: { 'Content-Type': 'application/json', 'X-Pin': AI_PIN },
           body: JSON.stringify({ model: 'haiku', message: briefPrompt, use_tools: false })
         });
         const llmData = await llmRes.json();
