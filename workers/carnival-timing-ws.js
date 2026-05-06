@@ -1888,6 +1888,20 @@ var CarnivalRoom = class {
     const data = await this.state.storage.get("data") || {};
     const seq = await this.state.storage.get("seq") || 0;
     const id = msg.id;
+
+    // ── Server-side auth gate ──────────────────────────────────────
+    const _att = ws.deserializeAttachment() || {};
+    const _isAdmin = _att.isAdmin === true;
+    const _writeTyes = ['set','update','push','remove'];
+    if (_writeTyes.includes(msg.type)) {
+      const _storedPin = getAt(data, 'meta')?.adminPin;
+      if (_storedPin && !_isAdmin) {
+        ws.send(j({ type: 'error', id, message: 'unauthorized' }));
+        return;
+      }
+    }
+    // ──────────────────────────────────────────────────────────────
+
     switch (msg.type) {
       case "servertime":
         ws.send(j({ type: "servertime", id, ts: Date.now() }));
@@ -1909,6 +1923,29 @@ var CarnivalRoom = class {
       case "get": {
         const val = getAt(data, msg.path);
         ws.send(j({ type: "snapshot", id, path: msg.path, data: val, seq }));
+        break;
+      }
+      case "auth": {
+        // Server-side PIN verification — sets isAdmin on this WS connection
+        const storedPin = getAt(data, 'meta')?.adminPin;
+        if (!storedPin) {
+          // No PIN configured — auto-grant admin
+          ws.serializeAttachment({ ..._att, isAdmin: true, authFails: 0 });
+          ws.send(j({ type: 'auth_ok', id }));
+          break;
+        }
+        const fails = _att.authFails || 0;
+        if (fails >= 5) {
+          ws.send(j({ type: 'auth_fail', id, message: 'too_many_attempts' }));
+          break;
+        }
+        if (String(msg.pin) === String(storedPin)) {
+          ws.serializeAttachment({ ..._att, isAdmin: true, authFails: 0 });
+          ws.send(j({ type: 'auth_ok', id }));
+        } else {
+          ws.serializeAttachment({ ..._att, isAdmin: false, authFails: fails + 1 });
+          ws.send(j({ type: 'auth_fail', id, message: 'wrong_pin' }));
+        }
         break;
       }
       case "set": {
@@ -2131,4 +2168,4 @@ __name2(deepClone, "deepClone");
 export {
   CarnivalRoom,
   worker_default as default
-};
+};
