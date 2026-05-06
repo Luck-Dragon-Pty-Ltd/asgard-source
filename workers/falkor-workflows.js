@@ -389,18 +389,33 @@ function getPaddyState() {
   return { mode: 'free', quiet: false, label: 'free' };
 }
 
-// ── Send Telegram message via falkor-telegram worker ──────────────────────────
+// ── Send Telegram message ─────────────────────────────────────────────────────
 async function sendTelegram(env, text) {
   try {
+    // Preferred: call Telegram API directly (avoids inter-worker AGENT_PIN sync)
+    const token = env.TELEGRAM_BOT_TOKEN;
+    const chatId = env.TELEGRAM_CHAT_ID;
+    if (token && chatId) {
+      const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true }),
+      });
+      if (r.ok) {
+        const d = await r.json().catch(() => ({}));
+        if (d.result && d.result.message_id) return true;
+      }
+    }
+    // Fallback: route via falkor-telegram proxy
     const tgUrl = (env.TELEGRAM_URL || 'https://falkor-telegram.luckdragon.io') + '/send';
-    const r = await fetch(tgUrl, {
+    const r2 = await fetch(tgUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Pin': env.AGENT_PIN || '' },
       body: JSON.stringify({ text, target: 'paddy', parse_mode: 'HTML' }),
     });
-    if (!r.ok) return false;
-    const d = await r.json().catch(() => ({}));
-    return !!(d.message_id || (d.result && d.result.message_id));
+    if (!r2.ok) return false;
+    const d2 = await r2.json().catch(() => ({}));
+    return !!(d2.message_id || (d2.result && d2.result.message_id));
   } catch { return false; }
 }
 
