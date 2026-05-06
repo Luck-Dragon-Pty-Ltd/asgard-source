@@ -83,6 +83,15 @@ async function handleSubmit(request, env) {
   try { body = await request.json(); } catch(e) { return new Response(JSON.stringify({error:"Invalid JSON"}), {status:400, headers:{...CORS,"Content-Type":"application/json"}}); }
   const { title, name, email, phone, category, description, tier } = body;
   if (!title || !name || !email || !description || !tier) return new Response(JSON.stringify({error:"Missing required fields"}), {status:400, headers:{...CORS,"Content-Type":"application/json"}});
+  // Honeypot: 'website' field is hidden via CSS — bots fill it; humans don't
+  if (body.website && String(body.website).length > 0) {
+    return new Response(JSON.stringify({error:"Submission blocked"}), {status:400, headers:{...CORS,"Content-Type":"application/json"}});
+  }
+  // Min-time check: form submitted in <2s after render is bot-like
+  const renderTs = Number(body.t)||0;
+  if (renderTs > 0 && (Date.now() - renderTs) < 2000) {
+    return new Response(JSON.stringify({error:"Submission blocked"}), {status:400, headers:{...CORS,"Content-Type":"application/json"}});
+  }
   const priceId = STRIPE_PRICES[tier];
   if (!priceId) return new Response(JSON.stringify({error:"Invalid tier"}), {status:400, headers:{...CORS,"Content-Type":"application/json"}});
 
@@ -134,6 +143,10 @@ async function handleSubmit(request, env) {
     return new Response(JSON.stringify({error: e.message||"Payment setup failed"}), {status:500, headers:{...CORS,"Content-Type":"application/json"}});
   }
 
+  // Pre-compute status URL before email body uses it
+  const _statusTok = submissionId ? await statusToken(env, submissionId, email) : null;
+  const _statusUrl = _statusTok ? ("https://www.streamlinewebapps.com/status?t=" + _statusTok) : null;
+
   if (env.RESEND_KEY && checkoutUrl) {
     const firstName = name.split(" ")[0];
     // Notify Paddy of every new submission
@@ -182,9 +195,6 @@ async function handleSubmit(request, env) {
     }).catch(()=>{});
   }
 
-  // Send status link in customer email
-  const _statusTok = submissionId ? await statusToken(env, submissionId, email) : null;
-  const _statusUrl = _statusTok ? ("https://www.streamlinewebapps.com/status?t=" + _statusTok) : null;
   const respBody = JSON.stringify({checkout: checkoutUrl, status_url: _statusUrl});
   _idem.set(ikey, {until: Date.now()+60000, response: respBody});
   return new Response(respBody, {headers:{...CORS,"Content-Type":"application/json"}});
@@ -210,6 +220,82 @@ async function handleAdminData(request, env) {
     fetch(SUPA_REST+"/streamline_ideas?order=created_at.desc&limit=100", {headers: SUPA_H}).then(r=>r.json()).catch(()=>[])
   ]);
   return new Response(JSON.stringify({subs, ideas}), {headers:{...CORS,"Content-Type":"application/json"}});
+}
+
+// Auto-build preview app from submission spec — runs async after payment
+function slugify(t) {
+  return String(t||"app").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,40) || ("app-"+Date.now().toString(36));
+}
+async function autoBuildPreview(env, submissionId, title, email, tier) {
+  if (!env.ANTHROPIC_API_KEY || !env.CF_API_TOKEN || !env.CF_ACCOUNT_ID) return;
+  try {
+    const r = await fetch(SUPA_REST+"/streamline_submissions?id=eq."+encodeURIComponent(submissionId)+"&select=*", {headers: SUPA_H});
+    const d = await r.json();
+    const sub = Array.isArray(d) && d[0];
+    if (!sub) return;
+    const prompt = "Generate a single-file Cloudflare Worker (module-style export default { fetch }) that scaffolds an MVP web app for this submission. Output ONLY valid JavaScript wrapped in ```javascript ... ``` fence. Requirements: single fetch handler with HTML on /, optional small JSON API; embed HTML inline; use only fetch/Response/URL APIs; Tailwind CDN classes OK; CORS headers; no secrets; small \"Built by Streamline\" footer link. Title: " + (sub.title||"") + " | Description: " + (sub.description||"") + " | Category: " + (sub.category||"Utility") + " | Tier: " + (sub.tier||"Standard");
+    const cr = await fetch("https://api.anthropic.com/v1/messages", {
+      method:"POST",
+      headers:{"x-api-key":env.ANTHROPIC_API_KEY,"anthropic-version":"2023-06-01","Content-Type":"application/json"},
+      body: JSON.stringify({model:"claude-haiku-4-5-20251001", max_tokens:4000, messages:[{role:"user", content: prompt}]})
+    });
+    if (!cr.ok) return;
+    const cd = await cr.json();
+    const text = (cd.content && cd.content[0] && cd.content[0].text) || "";
+    const codeMatch = text.match(/```(?:javascript|js)?\s*([\s\S]+?)```/);
+    const code = codeMatch ? codeMatch[1].trim() : text.trim();
+    if (!code || code.length < 100) return;
+    const slug = slugify(sub.title);
+    const scriptName = "streamline-app-" + slug;
+    const metadata = {main_module:"worker.js",compatibility_date:"2026-05-01",bindings:[]};
+    const boundary = "----stripe-deploy-"+Math.random().toString(36).slice(2,12);
+    const body = "--"+boundary+"\r\nContent-Disposition: form-data; name=\"metadata\"\r\nContent-Type: application/json\r\n\r\n" + JSON.stringify(metadata) + "\r\n--"+boundary+"\r\nContent-Disposition: form-data; name=\"worker.js\"; filename=\"worker.js\"\r\nContent-Type: application/javascript+module\r\n\r\n" + code + "\r\n--"+boundary+"--\r\n";
+    const dr = await fetch("https://api.cloudflare.com/client/v4/accounts/"+env.CF_ACCOUNT_ID+"/workers/scripts/"+scriptName, {
+      method:"PUT",
+      headers:{"Authorization":"Bearer "+env.CF_API_TOKEN, "Content-Type":"multipart/form-data; boundary="+boundary},
+      body
+    });
+    const dj = await dr.json();
+    if (!dj.success) return;
+    const hostname = slug + ".streamlinewebapps.com";
+    await fetch("https://api.cloudflare.com/client/v4/accounts/"+env.CF_ACCOUNT_ID+"/workers/domains", {
+      method:"PUT",
+      headers:{"Authorization":"Bearer "+env.CF_API_TOKEN, "Content-Type":"application/json"},
+      body: JSON.stringify({environment:"production", hostname, service: scriptName, zone_id:"6292327060a0a2209a084cc7f0566e1a"})
+    }).catch(()=>{});
+    const previewUrl = "https://" + hostname;
+    await fetch(SUPA_REST+"/streamline_submissions?id=eq."+encodeURIComponent(submissionId), {
+      method:"PATCH", headers: SUPA_H,
+      body: JSON.stringify({status:"preview"})
+    }).catch(()=>{});
+    if (env.RESEND_KEY && email) {
+      const tok = await statusToken(env, submissionId, email);
+      const statusUrl = "https://www.streamlinewebapps.com/status?t=" + tok;
+      const firstName = ((sub.name||"there").split(" ")[0]);
+      await fetch("https://api.resend.com/emails", {
+        method:"POST",
+        headers:{"Authorization":"Bearer "+env.RESEND_KEY, "Content-Type":"application/json"},
+        body: JSON.stringify({
+          from:"Streamline <hello@streamlinewebapps.com>",
+          to:[email],
+          subject:"Your preview is ready \u2014 \""+title+"\"",
+          html:"<div style='font-family:Inter,sans-serif;max-width:560px;margin:0 auto;padding:40px 24px'><h1 style='font-size:24px;font-weight:800;color:#1e1b4b;margin:0 0 8px'>Preview ready, "+htmlEscape(firstName)+"</h1><p style='color:#4c4885;font-size:15px;line-height:1.6;margin:0 0 24px'>An AI-generated draft of <strong>"+htmlEscape(title)+"</strong> is now live for review. Reply with feedback or approval and we\u2019ll iterate or lock it in.</p><a href='"+previewUrl+"' style='display:inline-block;background:#6d28d9;color:#fff;padding:14px 28px;border-radius:10px;text-decoration:none;font-weight:700;font-size:15px;margin-bottom:16px'>Open preview \u2192</a><p style='color:#9490c0;font-size:13px;margin:0 0 8px'>Status: <a href='"+statusUrl+"' style='color:#6d28d9'>track here</a></p><hr style='border:none;border-top:1px solid #e0ddf5;margin:28px 0'><p style='color:#9490c0;font-size:12px;margin:0'>Streamline \u00b7 Melbourne, Australia</p></div>"
+        })
+      }).catch(()=>{});
+    }
+    if (env.RESEND_KEY) {
+      await fetch("https://api.resend.com/emails", {
+        method:"POST",
+        headers:{"Authorization":"Bearer "+env.RESEND_KEY, "Content-Type":"application/json"},
+        body: JSON.stringify({
+          from:"Streamline <hello@streamlinewebapps.com>",
+          to:["paddy@luckdragon.io"],
+          subject:"\u2728 Auto-deployed preview: "+title+" \u2192 "+previewUrl,
+          html:"<div style='font-family:Inter,sans-serif;padding:24px'><h2>Preview deployed</h2><p>Submission #"+submissionId+" \u2014 <strong>"+htmlEscape(title)+"</strong> ("+tier+")</p><p>Preview: <a href='"+previewUrl+"'>"+previewUrl+"</a></p><p>Worker: <code>"+scriptName+"</code></p><p>Customer email sent. They can reply with feedback.</p></div>"
+        })
+      }).catch(()=>{});
+    }
+  } catch(e) {}
 }
 
 // Verify Stripe webhook signature (HMAC-SHA256)
@@ -253,6 +339,10 @@ async function handleStripeWebhook(request, env) {
           body: JSON.stringify({status:"paid", paid_at: new Date().toISOString()})
         });
       } catch(e) {}
+      // Async fire-and-forget: scaffold + auto-deploy preview (Standard/Priority tiers)
+      if (tier === "Standard" || tier === "Priority") {
+        autoBuildPreview(env, submissionId, title, email, tier).catch(()=>{});
+      }
     }
     // Send admin payment notification
     if (env.RESEND_KEY) {
@@ -367,7 +457,11 @@ export default {
 
     const cors = corsFor(request);
     if (request.method === "OPTIONS") return new Response(null, {status:204, headers:cors});
-    if (path === "/health") return new Response(JSON.stringify({ok:true,version:36,sha:"hello-sender-stripe-webhook-2026-05-06"}), {headers:{...cors,...SEC_HEADERS,"Content-Type":"application/json"}});
+    if (path === "/health") return new Response(JSON.stringify({ok:true,version:38,sha:"auto-pipeline-honeypot-tdz-fix-2026-05-06"}), {headers:{...cors,...SEC_HEADERS,"Content-Type":"application/json"}});
+    if (path === "/og.png" || path === "/og.svg") {
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630"><defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e1b4b"/><stop offset="1" stop-color="#6d28d9"/></linearGradient><linearGradient id="grad" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#a78bfa"/><stop offset="0.5" stop-color="#fbbf24"/><stop offset="1" stop-color="#fff"/></linearGradient></defs><rect width="1200" height="630" fill="url(#bg)"/><circle cx="1050" cy="120" r="180" fill="#a78bfa" opacity="0.12"/><circle cx="120" cy="540" r="220" fill="#fbbf24" opacity="0.08"/><g transform="translate(80, 90)"><rect width="80" height="80" rx="20" fill="#fff" opacity="0.15"/><text x="40" y="58" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="42" font-weight="800" fill="#fff">S</text></g><text x="80" y="280" font-family="Inter,Arial,sans-serif" font-size="36" font-weight="500" fill="#a78bfa">Streamline Webapps</text><text x="80" y="370" font-family="Inter,Arial,sans-serif" font-size="84" font-weight="800" fill="#fff" letter-spacing="-2">Submit an idea.</text><text x="80" y="455" font-family="Inter,Arial,sans-serif" font-size="84" font-weight="800" fill="#fff" letter-spacing="-2">We build it.</text><text x="80" y="540" font-family="Inter,Arial,sans-serif" font-size="84" font-weight="800" fill="url(#grad)" letter-spacing="-2">You earn forever.</text><text x="80" y="595" font-family="Inter,Arial,sans-serif" font-size="22" font-weight="400" fill="#a78bfa" opacity="0.85">25% lifetime revenue share \u00b7 AU \u00b7 streamlinewebapps.com</text></svg>`;
+      return new Response(svg, {headers:{...SEC_HEADERS,"Content-Type":"image/svg+xml","Cache-Control":"public,max-age=86400"}});
+    }
     if (path === "/robots.txt") return new Response("User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /admin/\nDisallow: /analytics\nSitemap: https://streamlinewebapps.com/sitemap.xml\n", {headers:{"Content-Type":"text/plain;charset=utf-8","Cache-Control":"public,max-age=3600",...SEC_HEADERS}});
     if (path === "/favicon.ico") return new Response('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#6d28d9"/><text x="16" y="22" text-anchor="middle" font-family="Arial,sans-serif" font-size="20" font-weight="800" fill="#fff">S</text></svg>', {headers:{"Content-Type":"image/svg+xml","Cache-Control":"public,max-age=86400",...SEC_HEADERS}});
     if (path === "/status") {
@@ -392,19 +486,34 @@ export default {
       if (!rateOk(ip, "chat", 20)) return new Response(JSON.stringify({reply:"Too many messages, slow down a sec."}), {status:429, headers:{...cors,...SEC_HEADERS,"Content-Type":"application/json"}});
       let body = {};
       try { body = await request.json(); } catch(e) {}
-      const m = String(body.message||"").toLowerCase().slice(0,500);
-      let reply = "Good question! For anything I can\u2019t answer here, email hello@streamlinewebapps.com or check /terms and /refunds.";
-      if (/price|cost|tier|standard|priority|equity|how much|fee/.test(m)) reply = "Standard $29 / Priority $99 / Equity $299 AUD \u2014 one-time payment + 25% perpetual revenue share. Equity tier includes a signed deed.";
-      else if (/refund|money back|guarantee/.test(m)) reply = "Standard: full refund if we haven\u2019t started within 30 days. Priority: 14 days. Equity: 14 days (with 48hr build-start commitment). See /refunds for the full policy.";
-      else if (/payout|pay out|paid|when do i get/.test(m)) reply = "Quarterly payouts via Australian bank transfer (PayID or BSB/Account), within 30 days of quarter-end. Minimum threshold $50 \u2014 below that the balance rolls.";
-      else if (/own|ip|intellectual|copyright/.test(m)) reply = "We (Streamline) own the IP in the built app. You receive a perpetual 25% revenue-share licence via signed deed (Equity tier).";
-      else if (/time|delivery|build|long|fast|when/.test(m)) reply = "Standard: 1\u20134 weeks. Priority: jumps the queue. Equity: dedicated team, custom domain. We also send a preview within 48 hours of payment so you can review before we lock it in.";
-      else if (/where|location|country|austral/.test(m)) reply = "We\u2019re based in Melbourne, Australia. Currently AU-focused but we accept submissions from anywhere via Stripe.";
-      else if (/marketplace|other apps|examples|portfolio/.test(m)) reply = "Scroll down to \u201CWhat we\u2019ve built\u201D \u2014 it\u2019s our founder\u2019s pre-Streamline portfolio (proof we ship). Customer marketplace launches with the first paid customer.";
-      else if (/insurance|liabili/.test(m)) reply = "Professional Indemnity and Cyber Liability cover are being arranged with BizCover/Aon. We\u2019ll display proof of cover here once bound.";
-      else if (/contact|email|reach/.test(m)) reply = "Email us at hello@streamlinewebapps.com \u2014 replies typically within 24 hours.";
-      else if (/hi|hello|hey|g\u2019day/.test(m)) reply = "G\u2019day! Ask about pricing, refunds, build time, IP, payouts, or how the marketplace works. Or just submit your idea above.";
-      return new Response(JSON.stringify({reply}), {headers:{...cors,...SEC_HEADERS,"Content-Type":"application/json"}});
+      const userMsg = String(body.message||"").slice(0,500);
+      if (!userMsg) return new Response(JSON.stringify({reply:"What\u2019s your question?"}), {headers:{...cors,...SEC_HEADERS,"Content-Type":"application/json"}});
+      // Try Claude first; fall through to rule-based on error
+      if (env.ANTHROPIC_API_KEY) {
+        try {
+          const sys = "You are the assistant on streamlinewebapps.com (Streamline Webapps), an Australian web-apps marketplace. Customers submit app ideas, pay one-time ($29 Standard / $99 Priority / $299 Equity AUD), and a small team builds the app using Claude/GPT AI tools (1-4 week turnaround, personally reviewed within 48 hours). Customer earns 25% lifetime revenue share. Refunds: Standard 30-day if build hasn\u2019t started, Priority 14-day, Equity 14-day with 48hr build-start commitment. Quarterly payouts via AU bank transfer (PayID/BSB), minimum $50 threshold. We (Streamline) own the IP; customer gets a perpetual revenue-share licence via signed deed (Equity tier). Marketplace is launching with first paying customer in 2026 \u2014 earlier \u2018live apps\u2019 on the homepage are founder portfolio, not customer wins. Based in Melbourne, AU. Insurance: PI/Cyber being arranged with BizCover/Aon. Reply concisely (1-3 sentences). Be honest about what we do and don\u2019t have. Email hello@streamlinewebapps.com for anything not covered.";
+          const cr = await fetch("https://api.anthropic.com/v1/messages", {
+            method:"POST",
+            headers:{"x-api-key":env.ANTHROPIC_API_KEY,"anthropic-version":"2023-06-01","Content-Type":"application/json"},
+            body: JSON.stringify({model:"claude-haiku-4-5-20251001", max_tokens:300, system: sys, messages:[{role:"user", content: userMsg}]})
+          });
+          if (cr.ok) {
+            const cd = await cr.json();
+            const reply = (cd.content && cd.content[0] && cd.content[0].text) || "";
+            if (reply) return new Response(JSON.stringify({reply, src:"claude"}), {headers:{...cors,...SEC_HEADERS,"Content-Type":"application/json"}});
+          }
+        } catch(e) {}
+      }
+      // Rule-based fallback
+      const m = userMsg.toLowerCase();
+      let reply = "For anything I can\u2019t answer here, email hello@streamlinewebapps.com.";
+      if (/price|cost|tier|standard|priority|equity|how much|fee/.test(m)) reply = "Standard $29 / Priority $99 / Equity $299 AUD \u2014 one-time + 25% perpetual revenue share.";
+      else if (/payout|pay out|paid|when do i get/.test(m)) reply = "Quarterly payouts via AU bank transfer, within 30 days of quarter-end. Minimum $50 threshold.";
+      else if (/refund/.test(m)) reply = "Standard 30-day, Priority 14-day, Equity 14-day refund if build hasn\u2019t started.";
+      else if (/time|build|long|fast|when/.test(m)) reply = "Standard 1\u20134 weeks. Priority jumps the queue. Preview within 48 hours of payment.";
+      else if (/own|ip|copyright/.test(m)) reply = "Streamline owns the built IP. You get a perpetual 25% revenue-share licence (Equity tier).";
+      else if (/contact|email|reach/.test(m)) reply = "hello@streamlinewebapps.com \u2014 replies within 24 hours.";
+      return new Response(JSON.stringify({reply, src:"fallback"}), {headers:{...cors,...SEC_HEADERS,"Content-Type":"application/json"}});
     }
     if (path === "/stats" && request.method === "GET") {
       // Real stats from DB, replaces the upstream proxy
@@ -1045,6 +1154,7 @@ function renderDash(d){
   ih+="</table>";
   document.getElementById("ideas-table").innerHTML=ih;
 }
+window.addEventListener("load",function(){var fr=document.getElementById("f-rendered"); if(fr) fr.value=Date.now();});
 </script>
 </body></html>`;
 
@@ -1058,11 +1168,13 @@ const HTML = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta 
 <meta property="og:description" content="Turn your app idea into recurring revenue. We build with AI, you earn 25% of every sale — forever."/>
 <meta property="og:url" content="https://streamlinewebapps.com/"/>
 <meta property="og:type" content="website"/>
-<meta property="og:image" content="https://streamlinewebapps.com/og.png"/>
+<meta property="og:image" content="https://streamlinewebapps.com/og.svg"/>
+<meta property="og:image:width" content="1200"/>
+<meta property="og:image:height" content="630"/>
 <meta name="twitter:card" content="summary_large_image"/>
 <meta name="twitter:title" content="Streamline — Submit an idea. We build it. You earn forever."/>
 <meta name="twitter:description" content="Turn your app idea into recurring revenue. We build with AI, you earn 25% of every sale — forever."/>
-<meta name="twitter:image" content="https://streamlinewebapps.com/og.png"/>
+<meta name="twitter:image" content="https://streamlinewebapps.com/og.svg"/>
 <link rel="preconnect" href="https://fonts.googleapis.com"/><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet"/>
 <style>
@@ -1520,7 +1632,7 @@ footer{background:var(--ink);color:rgba(255,255,255,.55);padding:56px 40px 36px;
     <p class="form-sub">Fill in the details below. We save your idea and take you straight to payment.</p>
     <div class="sel-tier-bar" id="sel-tier"><span>Select a pricing tier above to get started</span><a href="#tiers" style="font-size:13px;color:var(--accent);font-weight:600">Choose tier →</a></div>
     <div class="form-row">
-      <div class="form-group"><label>App title *</label><input id="f-title" placeholder="e.g. Café Roster Manager" maxlength="120"/></div>
+      <div class="form-group"><label>App title *</label><input id="f-title" placeholder="e.g. Café Roster Manager" maxlength="120"/></div><input type="text" name="website" id="f-website" tabindex="-1" autocomplete="off" style="position:absolute;left:-9999px;height:0;width:0;opacity:0" aria-hidden="true"/><input type="hidden" id="f-rendered" value=""/>
       <div class="form-group"><label>Category *</label>
         <select id="f-cat">
           <option value="Utility">Utility</option><option value="Finance">Finance</option><option value="Health">Health</option>
@@ -1773,7 +1885,7 @@ function submitIdea(){
   if(!selTier){toast("Please select a pricing tier above","error");document.getElementById("tiers").scrollIntoView({behavior:"smooth"});return;}
   if(!document.getElementById("age-confirm").checked){toast("Please confirm you are 18 or older","error");return;}
   var btn=document.querySelector(".submit-btn");btn.textContent="Saving...";btn.disabled=true;
-  fetch("/submit",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:title,name:name,email:email,phone:phone,category:cat,description:desc,tier:selTier})})
+  fetch("/submit",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:title,name:name,email:email,phone:phone,category:cat,description:desc,tier:selTier,website:(document.getElementById("f-website")||{}).value||"",t:(document.getElementById("f-rendered")||{}).value||0})})
   .then(function(r){return r.json();})
   .then(function(d){
     if(d.checkout){toast("Redirecting to payment...","success");setTimeout(function(){window.location.href=d.checkout;},600);}
