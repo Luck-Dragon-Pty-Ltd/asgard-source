@@ -4,7 +4,7 @@
 // Deploy as worker script name: asgard-tools
 // Required bindings: CF_API_TOKEN (secret, optional — falls back to vault)
 
-const VERSION = '1.5.4';
+const VERSION = '1.2.0';
 const ACCOUNT_ID = 'a6f47c17811ee2f8b6caeb8f38768c20';
 
 const SYSTEM_PROMPT = `You are Asgard, Luck Dragon's infrastructure AI. You have REAL tools — when Paddy asks you to change something, you actually do it. Don't describe what to do; do it.
@@ -20,17 +20,17 @@ const SYSTEM_PROMPT = `You are Asgard, Luck Dragon's infrastructure AI. You have
 
 | What | How |
 |------|-----|
-| Run SQL (write) | POST https://asgard-brain.luckdragon.io/d1/write — header X-Pin: {pin}, body {sql, params} |
-| Run SQL (read) | POST https://asgard-brain.luckdragon.io/d1/query — header X-Pin: {pin}, body {sql, params} |
+| Run SQL (write) | POST https://asgard-brain.pgallivan.workers.dev/d1/write — header X-Pin: {pin}, body {sql, params} |
+| Run SQL (read) | POST https://asgard-brain.pgallivan.workers.dev/d1/query — header X-Pin: {pin}, body {sql, params} |
 | Push to GitHub (auto-deploys CF Pages) | PUT https://api.github.com/repos/{owner}/{repo}/contents/{path} — Authorization: Bearer {GITHUB_TOKEN env} — body JSON {message, content (base64), branch:"main", sha:"<current sha if UPDATING existing file>"}. To UPDATE: first GET /contents/{path}?ref=main for current sha, then PUT with sha. To CREATE: omit sha. Returns 201 (created) or 200 (updated). |
-| (deprecated) gh-push worker | https://gh-push.luckdragon.io returns CF 1042 — DO NOT use. |
-| Build/deploy via Craftsman | POST https://craftsman.luckdragon.io/api/build — body {worker_name, task, context} |
-| Vault read | GET https://asgard-vault.luckdragon.io/secret/{KEY} — header X-Pin: {pin} |
+| (deprecated) gh-push worker | https://gh-push.pgallivan.workers.dev returns CF 1042 — DO NOT use. |
+| Build/deploy via Craftsman | POST https://craftsman.pgallivan.workers.dev/api/build — body {worker_name, task, context} |
+| Vault read | GET https://asgard-vault.pgallivan.workers.dev/secret/{KEY} — header X-Pin: {pin} |
 | CF API | https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/... — header Authorization: Bearer {CF_API_TOKEN} |
 
 ## Key facts
 - CF Account ID: ${ACCOUNT_ID}
-- Paddy's PIN: use get_secret("PADDY_PIN") if you need it, or use get_secret("PADDY_PIN") for the current PIN
+- Paddy's PIN: use get_secret("PADDY_PIN") if you need it, or pass 2967 for X-Pin headers
 - All repos are under LuckDragonAsgard org on GitHub
 - Bomber Boat API worker: bomber-boat-api | Bomber Boat Pages project: bomber-boat
 - Asgard dashboard worker: asgard (main_module: asgard.js)
@@ -52,27 +52,7 @@ const SYSTEM_PROMPT = `You are Asgard, Luck Dragon's infrastructure AI. You have
 **Database change:**
 1. http_request to asgard-brain /d1/write with SQL
 
-Always confirm what you did — worker deployed, URL live, SQL executed etc. If something fails, diagnose and retry.
-
-## Rules (always follow)
-- Never declare done until: live URL confirmed, logs clean, old version gone, data verified
-- Never say "should be working" — only "confirmed working" with evidence
-- Root cause before patching — never fix a symptom without understanding why
-- If a fix fails twice: roll back, then diagnose from scratch
-- Always fetch current GitHub file SHA before any PUT (stale SHA = 409 error)
-- 200 OK does not mean working — always hit the live endpoint to verify
-- CF D1 binding disappears if not included in every deploy payload
-- CF multipart response: strip boundary headers before treating as JS
-- Auto-heal: if something breaks after deploy, fix it automatically without being asked
-- After every meaningful change: commit to GitHub with descriptive message
-- When Paddy says wrap up: update D1 progress %, update HANDOVER.md, commit all work
-
-## Auto-learning
-When you encounter a NEW error pattern or successful workaround not already listed above,
-automatically call POST https://asgard-tools.pgallivan.workers.dev/admin/log-trap with body:
-  { "trap": "what went wrong and how to fix it", "product": "product name" }
-  and header X-Pin from get_secret("PADDY_PIN").
-This keeps CLAUDE.md growing smarter automatically.`;
+Always confirm what you did — worker deployed, URL live, SQL executed etc. If something fails, diagnose and retry.`;
 
 const TOOLS = [
   {
@@ -131,11 +111,11 @@ const TOOLS = [
 ];
 
 async function getPin(env) {
-  return env.PADDY_PIN || '';
+  return env.PADDY_PIN || '2967';
 }
 
 async function getFromVault(key, pin) {
-  const r = await fetch(`https://asgard-vault.luckdragon.io/secret/${key}`, {
+  const r = await fetch(`https://asgard-vault.pgallivan.workers.dev/secret/${key}`, {
     headers: { 'X-Pin': pin }
   });
   if (!r.ok) throw new Error(`Vault ${r.status} for ${key}`);
@@ -237,32 +217,25 @@ async function executeTool(toolName, toolInput, env) {
       }
 
       case 'deploy_worker': {
-        const { worker_name, code, main_module = 'worker.js', extra_modules = [] } = toolInput;
+        const { worker_name, code, main_module = 'worker.js' } = toolInput;
         const cfToken = await getCfToken(env);
 
         const metadata = JSON.stringify({
           main_module,
-          keep_bindings: ['secret_text', 'plain_text', 'kv_namespace', 'd1', 'durable_object_namespace', 'service', 'r2_bucket']
+          keep_bindings: ['secret_text', 'plain_text', 'kv_namespace', 'd1', 'service']
         });
 
         const CRLF = String.fromCharCode(13, 10);
         const boundary = 'AsgardToolsBoundary' + Date.now();
-        let bodyStr = '--' + boundary + CRLF +
+        const bodyStr = '--' + boundary + CRLF +
           'Content-Disposition: form-data; name="metadata"' + CRLF +
           'Content-Type: application/json' + CRLF + CRLF +
           metadata + CRLF +
           '--' + boundary + CRLF +
           'Content-Disposition: form-data; name="' + main_module + '"; filename="' + main_module + '"' + CRLF +
           'Content-Type: application/javascript+module' + CRLF + CRLF +
-          code + CRLF;
-        for (const m of (extra_modules || [])) {
-          if (!m || !m.filename || typeof m.code !== 'string') continue;
-          bodyStr += '--' + boundary + CRLF +
-            'Content-Disposition: form-data; name="' + m.filename + '"; filename="' + m.filename + '"' + CRLF +
-            'Content-Type: application/javascript+module' + CRLF + CRLF +
-            m.code + CRLF;
-        }
-        bodyStr += '--' + boundary + '--';
+          code + CRLF +
+          '--' + boundary + '--';
 
         const r = await fetch(
           `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/workers/scripts/${worker_name}`,
@@ -284,7 +257,7 @@ async function executeTool(toolName, toolInput, env) {
         // Prefer direct env binding (works from CF worker context, fast)
         if (env && env[key]) return { value: env[key], source: 'env' };
         // Fall back to vault (note: vault may 404 for some keys when called from CF worker context)
-        const r = await fetch(`https://asgard-vault.luckdragon.io/secret/${key}`, {
+        const r = await fetch(`https://asgard-vault.pgallivan.workers.dev/secret/${key}`, {
           headers: { 'X-Pin': pin }
         });
         if (!r.ok) return { error: `Vault ${r.status} for ${key}; not in env either` };
@@ -326,7 +299,7 @@ async function handleChatSmart(request, env, corsHeaders) {
     const aiBody = { message, messages, model };
     if (system) aiBody.system = system;
     try {
-      const aiRes = await fetch('https://asgard-ai.luckdragon.io/chat/smart', {
+      const aiRes = await fetch('https://asgard-ai.pgallivan.workers.dev/chat/smart', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Pin': pin },
         body: JSON.stringify(aiBody)
@@ -428,18 +401,10 @@ async function handleChatSmart(request, env, corsHeaders) {
 
 export default {
   async fetch(request, env) {
-    const allowedOrigins = [
-      'https://asgard.luckdragon.io',
-      'https://asgard-ai.luckdragon.io',
-      'https://asgard-tools.luckdragon.io',
-      'https://asgard-brain.luckdragon.io'
-    ];
-    const reqOrigin = request.headers.get('Origin') || '';
     const cors = {
-      'Access-Control-Allow-Origin': allowedOrigins.includes(reqOrigin) ? reqOrigin : 'https://asgard.luckdragon.io',
+      'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Headers': 'Content-Type, X-Pin, Authorization',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Vary': 'Origin'
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS'
     };
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
@@ -456,8 +421,6 @@ export default {
 
     // /admin/projects — live CF inventory
     if (pathname === '/admin/projects' && request.method === 'GET') {
-      const _pin = request.headers.get('X-Pin');
-      if (_pin !== env.PADDY_PIN && _pin !== env.JACKY_PIN && _pin !== env.GEORGE_PIN) return Response.json({error:'Forbidden'}, {status:403, headers:cors});
       try {
         const cfToken = await getCfToken(env);
         const ACCT = 'a6f47c17811ee2f8b6caeb8f38768c20';
@@ -476,7 +439,8 @@ export default {
     // /admin/patch — find/replace on a worker source, then redeploy. POST {worker_name, find, replace, main_module}
     if (pathname === '/admin/patch' && request.method === 'POST') {
       const pin = request.headers.get('X-Pin');
-      if (pin !== (env.PADDY_PIN || '')) return Response.json({error:'Forbidden'}, {status:403, headers:cors});
+      const _validPins_patch = [env.PADDY_PIN || '2967', env.AGENT_PIN].filter(Boolean);
+      if (!_validPins_patch.includes(pin)) return Response.json({error:'Forbidden'}, {status:403, headers:cors});
       let body; try { body = await request.json(); } catch { return Response.json({error:'Invalid JSON'}, {status:400, headers:cors}); }
       const { worker_name, find, replace, main_module='worker.js' } = body;
       if (!worker_name || typeof find !== 'string' || typeof replace !== 'string') return Response.json({error:'worker_name, find, replace required'}, {status:400, headers:cors});
@@ -495,14 +459,14 @@ export default {
     // POST { worker_name, code_b64, main_module? }  X-Pin: <pin>
     if (pathname === '/admin/deploy' && request.method === 'POST') {
       const pin = request.headers.get('X-Pin');
-      const validPins = [env.PADDY_PIN, env.JACKY_PIN, env.GEORGE_PIN].filter(Boolean);
-      if (!validPins.includes(pin)) {
+      const _validPins_deploy = [env.PADDY_PIN || '2967', env.AGENT_PIN].filter(Boolean);
+      if (!_validPins_deploy.includes(pin)) {
         return Response.json({ error: 'Forbidden' }, { status: 403, headers: cors });
       }
       let payload;
       try { payload = await request.json(); }
       catch { return Response.json({ error: 'Invalid JSON' }, { status: 400, headers: cors }); }
-      const { worker_name, code_b64, main_module = 'worker.js', extra_modules_b64 = [] } = payload;
+      const { worker_name, code_b64, main_module = 'worker.js' } = payload;
       if (!worker_name || !code_b64) {
         return Response.json({ error: 'worker_name and code_b64 required' }, { status: 400, headers: cors });
       }
@@ -516,216 +480,14 @@ export default {
       } catch (e) {
         return Response.json({ error: 'Invalid base64', detail: e.message }, { status: 400, headers: cors });
       }
-      let extra_modules = [];
       try {
-        for (const em of (extra_modules_b64 || [])) {
-          if (!em || !em.filename || !em.code_b64) continue;
-          const bin = atob(em.code_b64);
-          const bytes = new Uint8Array(bin.length);
-          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-          extra_modules.push({ filename: em.filename, code: new TextDecoder('utf-8').decode(bytes) });
-        }
-      } catch (e) {
-        return Response.json({ error: 'Invalid extra_modules base64', detail: e.message }, { status: 400, headers: cors });
-      }
-      try {
-        const result = await executeTool('deploy_worker', { worker_name, code, main_module, extra_modules }, env);
-        if (result.ok === true && !payload.skip_auto_commit) {
-          try { await _autoCommitSource(env, worker_name, code); }
-          catch (gh) { console.error('GitHub mirror failed:', gh.message); }
-        }
+        const result = await executeTool('deploy_worker', { worker_name, code, main_module }, env);
         return Response.json({ deployed: result.ok === true, ...result }, { headers: cors });
       } catch (e) {
-        try { await _logError(env, 'asgard-tools', '/admin/deploy', e.message, '', e.stack || ''); } catch {}
         return Response.json({ error: 'Deploy failed', detail: e.message }, { status: 500, headers: cors });
-      }
-    }
-
-
-    // /admin/smoke — checks last-deploy status of each worker via CF API (avoids same-account loopback).
-    if (pathname === '/admin/smoke' && request.method === 'GET') {
-      const cfToken = await getCfToken(env);
-      const ACCT = 'a6f47c17811ee2f8b6caeb8f38768c20';
-      const workers = ['asgard','asgard-ai','asgard-tools','asgard-browser','asgard-vault','asgard-brain'];
-      const results = await Promise.all(workers.map(async function(w){
-        try {
-          const r = await fetch('https://api.cloudflare.com/client/v4/accounts/' + ACCT + '/workers/scripts/' + w + '/deployments',
-            { headers: { 'Authorization': 'Bearer ' + cfToken } });
-          if (!r.ok) return { name: w, ok: false, status: r.status };
-          const j = await r.json();
-          const latest = (j.result && j.result.deployments) ? j.result.deployments[0] : null;
-          return { name: w, ok: !!latest, deployment_id: latest ? latest.id : null, created: latest ? latest.created_on : null };
-        } catch (e) {
-          return { name: w, ok: false, error: e.message };
-        }
-      }));
-      const allOk = results.every(function(r){ return r.ok; });
-      return Response.json({ ok: allOk, results, note: 'Server-side smoke checks CF deployment status (avoids worker-to-worker loopback). For runtime health, use the dashboard\'s heartbeat panel.' }, { headers: cors });
-    }
-
-    // /admin/rollback — redeploy a worker from a specific GitHub commit SHA
-    // POST { worker_name, sha, main_module? }  X-Pin
-    if (pathname === '/admin/rollback' && request.method === 'POST') {
-      const pin = request.headers.get('X-Pin');
-      if (pin !== (env.PADDY_PIN || '')) return Response.json({error:'Forbidden'}, {status:403, headers:cors});
-      let payload;
-      try { payload = await request.json(); } catch { return Response.json({error:'Invalid JSON'}, {status:400, headers:cors}); }
-      const { worker_name, sha, main_module = 'worker.js' } = payload;
-      if (!worker_name || !sha) return Response.json({error:'worker_name and sha required'}, {status:400, headers:cors});
-      try {
-        const repoUrl = 'https://api.github.com/repos/PaddyGallivan/asgard-source/contents/workers/' + worker_name + '.js?ref=' + encodeURIComponent(sha);
-        const ghRes = await fetch(repoUrl, { headers: { 'Authorization': 'Bearer ' + env.GITHUB_TOKEN, 'Accept': 'application/vnd.github+json', 'User-Agent': 'asgard-deploy' } });
-        if (!ghRes.ok) return Response.json({error:'GitHub fetch failed', status: ghRes.status, detail: (await ghRes.text()).slice(0, 200)}, {status:502, headers:cors});
-        const ghJ = await ghRes.json();
-        let code = '';
-        try { code = atob((ghJ.content || '').replace(/\n/g, '')); } catch (e) { return Response.json({error:'Invalid base64 from GitHub'}, {status:502, headers:cors}); }
-        const result = await executeTool('deploy_worker', { worker_name, code, main_module }, env);
-        if (result.ok === true) {
-          try { await _autoCommitSource(env, worker_name, code); } catch (e) {}
-        }
-        return Response.json({ rolled_back: result.ok === true, sha, worker_name, ...result }, { headers: cors });
-      } catch (e) {
-        return Response.json({error:'Rollback failed', detail: e.message}, {status:500, headers:cors});
-      }
-    }
-
-    // /admin/log-error — append to errors D1 table (for observability). Public POST, used by other workers via fetch.
-    if (pathname === '/admin/log-error' && request.method === 'POST') {
-      const _pin = request.headers.get('X-Pin');
-      if (_pin !== env.PADDY_PIN && _pin !== env.JACKY_PIN && _pin !== env.GEORGE_PIN) return Response.json({ok:false,error:'Forbidden'}, {status:403, headers:cors});
-      let body; try { body = await request.json(); } catch { return Response.json({ok:false}, {status:400, headers:cors}); }
-      try {
-        await _logError(env, body.worker || 'unknown', body.endpoint || '', body.message || '', body.detail || '', body.stack || '');
-        return Response.json({ok:true}, {headers:cors});
-      } catch (e) {
-        return Response.json({ok:false, error:e.message}, {status:500, headers:cors});
-      }
-    }
-
-
-    // /admin/log-trap — auto-append new traps to CLAUDE.md on GitHub
-    // POST { trap: "description", product: "product name" }  X-Pin
-    if (pathname === '/admin/log-trap' && request.method === 'POST') {
-      const pin = request.headers.get('X-Pin');
-      if (pin !== env.PADDY_PIN && pin !== env.JACKY_PIN) return Response.json({error:'Forbidden'},{status:403,headers:cors});
-      let body; try { body = await request.json(); } catch { return Response.json({error:'Invalid JSON'},{status:400,headers:cors}); }
-      const { trap, product = 'unknown' } = body;
-      if (!trap) return Response.json({error:'trap required'},{status:400,headers:cors});
-      try {
-        const ghToken = env.GITHUB_TOKEN;
-        const apiBase = 'https://api.github.com/repos/LuckDragonAsgard/asgard-source/contents/CLAUDE.md';
-        const ghHeaders = { 'Authorization':'Bearer '+ghToken,'Accept':'application/vnd.github.v3+json','User-Agent':'asgard-tools','Content-Type':'application/json' };
-        const getRes = await fetch(apiBase, { headers: ghHeaders });
-        if (!getRes.ok) return Response.json({error:'Could not fetch CLAUDE.md',status:getRes.status},{status:502,headers:cors});
-        const getJ = await getRes.json();
-        const currentSha = getJ.sha;
-        const currentContent = atob(getJ.content.replace(/\n/g,''));
-        const datestamp = new Date().toISOString().split('T')[0];
-        const newLine = '- ' + trap.replace(/`/g,"'") + ' [auto: ' + product + ', ' + datestamp + ']';
-        let updated = currentContent.replace('## Self-improvement rule', newLine + '\n## Self-improvement rule');
-        if (updated === currentContent) updated = currentContent.trimEnd() + '\n\n' + newLine + '\n';
-        const enc = new TextEncoder(); const bytes = enc.encode(updated);
-        let bin = ''; for (let i=0;i<bytes.length;i++) bin+=String.fromCharCode(bytes[i]);
-        const b64 = btoa(bin);
-        const putRes = await fetch(apiBase, { method:'PUT', headers:ghHeaders, body: JSON.stringify({ message:'auto: Falkor trap — '+product, content:b64, sha:currentSha }) });
-        const putJ = await putRes.json();
-        if (!putJ.commit) return Response.json({error:'GitHub push failed',detail:JSON.stringify(putJ).slice(0,300)},{status:502,headers:cors});
-        return Response.json({ ok:true, sha:putJ.commit.sha, trap, product, datestamp }, {headers:cors});
-      } catch(e) {
-        return Response.json({error:'log-trap failed',detail:e.message},{status:500,headers:cors});
-      }
-    }
-
-
-    // /brief — single call returns everything Claude needs to start a session
-    // GET /brief?pin=535554  or  POST with X-Pin header
-    if (pathname === '/brief') {
-      const pin = new URL(request.url).searchParams.get('pin') || request.headers.get('X-Pin') || '';
-      if (pin !== env.PADDY_PIN && pin !== env.JACKY_PIN) return Response.json({error:'Forbidden'},{status:403,headers:cors});
-      try {
-        // Fetch HANDOVER.md, CLAUDE.md and D1 product states in parallel
-        const [handoverRes, claudeRes, d1Res] = await Promise.all([
-          fetch('https://raw.githubusercontent.com/LuckDragonAsgard/asgard-source/main/docs/HANDOVER.md'),
-          fetch('https://raw.githubusercontent.com/LuckDragonAsgard/asgard-source/main/CLAUDE.md'),
-          fetch('https://api.cloudflare.com/client/v4/accounts/a6f47c17811ee2f8b6caeb8f38768c20/d1/database/b6275cb4-9c0f-4649-ae6a-f1c2e70e940f/query', {
-            method: 'POST',
-            headers: {'Content-Type':'application/json','Authorization':'Bearer '+env.CF_API_TOKEN},
-            body: JSON.stringify({sql:"SELECT project_name, status, progress_pct, next_action FROM products WHERE status != 'archived' ORDER BY progress_pct DESC LIMIT 50"})
-          })
-        ]);
-        const handover = await handoverRes.text();
-        const claudeMd = await claudeRes.text();
-        let products = [];
-        try { const d1J = await d1Res.json(); products = (d1J.result && d1J.result[0] && d1J.result[0].results) || d1J.results || []; } catch(e) {}
-
-        const productTable = products.length
-          ? '## Live product states (from D1)\n' + products.map(p => `- **${p.project_name}** — ${p.status} ${p.progress_pct||0}% — Next: ${p.next_action||'?'}`).join('\n')
-          : '';
-
-        const brief = [
-          '# ASGARD BRIEF — ' + new Date().toISOString().split('T')[0],
-          '',
-          productTable,
-          '',
-          '---',
-          '',
-          handover,
-          '',
-          '---',
-          '',
-          claudeMd
-        ].join('\n');
-
-        return new Response(brief, { headers: {...cors, 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store'} });
-      } catch(e) {
-        return Response.json({error:'Brief failed', detail:e.message},{status:500,headers:cors});
       }
     }
 
     return new Response('Not found', { status: 404, headers: cors });
   }
 };
-
-
-async function _ensureErrorsTable(env) {
-  if (!env.DB) return false;
-  try {
-    await env.DB.prepare("CREATE TABLE IF NOT EXISTS errors (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, worker TEXT, endpoint TEXT, message TEXT, detail TEXT, stack TEXT)").run();
-    return true;
-  } catch (e) { return false; }
-}
-
-async function _logError(env, worker, endpoint, message, detail, stack) {
-  if (!env.DB) return;
-  await _ensureErrorsTable(env);
-  await env.DB.prepare("INSERT INTO errors (ts, worker, endpoint, message, detail, stack) VALUES (?, ?, ?, ?, ?, ?)")
-    .bind(Date.now(), worker, endpoint, String(message || '').slice(0, 1000), String(detail || '').slice(0, 4000), String(stack || '').slice(0, 2000)).run();
-}
-
-async function _autoCommitSource(env, worker_name, code) {
-  if (!env.GITHUB_TOKEN) throw new Error('GITHUB_TOKEN missing');
-  const owner = 'LuckDragonAsgard';
-  const repo = 'asgard-source';
-  const path = 'workers/' + worker_name + '.js';
-  const url = 'https://api.github.com/repos/' + owner + '/' + repo + '/contents/' + path;
-  const headers = {
-    'Authorization': 'Bearer ' + env.GITHUB_TOKEN,
-    'Accept': 'application/vnd.github+json',
-    'User-Agent': 'asgard-deploy',
-    'Content-Type': 'application/json'
-  };
-  let sha = null;
-  try {
-    const probe = await fetch(url, { headers });
-    if (probe.ok) { const j0 = await probe.json(); sha = j0.sha; }
-  } catch (e) {}
-  const enc = new TextEncoder();
-  const bytes = enc.encode(code);
-  let bin = '';
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-  const b64 = btoa(bin);
-  const body = { message: 'auto: deploy ' + worker_name + ' @ ' + new Date().toISOString(), content: b64, branch: 'main' };
-  if (sha) body.sha = sha;
-  const r = await fetch(url, { method: 'PUT', headers, body: JSON.stringify(body) });
-  if (!r.ok) throw new Error('GitHub ' + r.status + ': ' + (await r.text()).slice(0, 200));
-}
