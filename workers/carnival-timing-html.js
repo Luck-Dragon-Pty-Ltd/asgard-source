@@ -1968,17 +1968,25 @@ function showRolePicker() {
 function _checkAdminPin(onSuccess) {
   const storedPin = carnivalMeta?.adminPin;
   if (!storedPin) {
-    // No PIN set — let them in, offer to set one
-    onSuccess();
-    _offerSetPin();
+    // No PIN set client-side — server will auto-grant; offer to set one after entry
+    _send({type:'auth', pin: null})
+      .then(r => { if (r.type === 'auth_ok') { onSuccess(); _offerSetPin(); } })
+      .catch(() => { onSuccess(); _offerSetPin(); }); // fallback if WS not ready
     return;
   }
-  _pinModal('Enter Admin PIN', (entered) => {
+  _pinModal('Enter Admin PIN', async (entered) => {
     if (entered === null) return; // cancelled
-    if (String(entered) === String(storedPin)) {
-      onSuccess();
-    } else {
-      toast('Incorrect PIN');
+    try {
+      const r = await _send({type: 'auth', pin: String(entered)});
+      if (r.type === 'auth_ok') {
+        onSuccess();
+      } else if (r.message === 'too_many_attempts') {
+        toast('Too many failed attempts — reconnect and try again.');
+      } else {
+        toast('Incorrect PIN');
+      }
+    } catch {
+      toast('Connection error — try again.');
     }
   });
 }
