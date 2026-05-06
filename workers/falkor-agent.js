@@ -102,10 +102,15 @@ function routeIntent(text) {
     return { agent: 'sport', action: 'summary' };
   if (/\b(trivia|kbt|kow|brainer|quiz|question|pub quiz|game|host|players|leaderboard|event tonight|next event)\b/.test(t))
     return { agent: 'kbt', action: 'query' };
-  if (/\b(self\.heal|worker health|which workers|heal falkor)\b/.test(t))
-    return { agent: 'code', action: 'heal' };
-  if (/\b(deploy|fix worker|broken worker|fleet|falkor-code|redeploy|code agent)\b/.test(t))
+  if (/\b(deploy|fix worker|broken worker|fleet|falkor-code|self.heal|redeploy|worker health|which workers|code agent)\b/.test(t)) {
+    // Detect specific deploy/fix/self-heal actions
+    const workerMatch = t.match(/\bfalkor-[\w-]+\b/);
+    const workerName = workerMatch ? workerMatch[0] : null;
+    if (/\bself[\s.-]?heal\b/.test(t)) return { agent: 'code', action: 'self_heal' };
+    if (/\b(fix|repair|broken)\b/.test(t) && workerName) return { agent: 'code', action: 'fix', workerName };
+    if (/\b(deploy|redeploy)\b/.test(t) && workerName) return { agent: 'code', action: 'deploy', workerName };
     return { agent: 'code', action: 'summary' };
+  }
   if (/(lesson plan|plan.*week|week.*plan|plan.*lesson|what should i teach|teaching plan|activities for|session plan|plan.*pe|pe.*plan|plan.*class|class.*plan)/.test(t))
     return { agent: 'school', action: 'lesson_week' };
   if (/(single lesson|one lesson|today.*lesson|lesson.*today|45.*min|30.*min|60.*min lesson)/.test(t) && /(pe|sport|lesson|teach|class|activity)/.test(t))
@@ -129,7 +134,7 @@ function routeIntent(text) {
   return null;
 }
 
-async function callSubAgent(agentKey, action, text, pin, aiPin) {
+async function callSubAgent(agentKey, action, text, pin, aiPin, intentCtx) {
   const baseUrl = AGENTS[agentKey];
   if (!baseUrl) return null;
   try {
@@ -138,11 +143,20 @@ async function callSubAgent(agentKey, action, text, pin, aiPin) {
         return fetch(`${baseUrl}/summary`, { headers: { 'X-Pin': pin } }).then(r => r.ok ? r.json() : null);
       case 'kbt':
         return fetch(`${baseUrl}/summary`, { headers: { 'X-Pin': pin } }).then(r => r.ok ? r.json() : null);
-      case 'code':
-        return fetch(action === 'heal' ? `${baseUrl}/heal` : `${baseUrl}/summary`, {
-          method: action === 'heal' ? 'POST' : 'GET',
-          headers: { 'X-Pin': pin },
-        }).then(r => r.ok ? r.json() : null).catch(() => null);
+      case 'code': {
+        const codeAction = agentKey === 'code' ? action : 'summary';
+        const workerName = intentCtx && intentCtx.workerName;
+        if (codeAction === 'self_heal') {
+          return fetch(`${baseUrl}/self-heal`, { method: 'POST', headers: { 'X-Pin': pin, 'Content-Type': 'application/json' }, body: '{}' }).then(r => r.ok ? r.json() : null);
+        }
+        if (codeAction === 'deploy' && workerName) {
+          return fetch(`${baseUrl}/deploy`, { method: 'POST', headers: { 'X-Pin': pin, 'Content-Type': 'application/json' }, body: JSON.stringify({ worker_name: workerName }) }).then(r => r.ok ? r.json() : null);
+        }
+        if (codeAction === 'fix' && workerName) {
+          return fetch(`${baseUrl}/fix`, { method: 'POST', headers: { 'X-Pin': pin, 'Content-Type': 'application/json' }, body: JSON.stringify({ worker_name: workerName }) }).then(r => r.ok ? r.json() : null);
+        }
+        return fetch(`${baseUrl}/summary`, { headers: { 'X-Pin': pin } }).then(r => r.ok ? r.json() : null);
+      }
       case 'brain':
         return fetch(`${baseUrl}/recall`, {
           method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Pin': pin },
@@ -632,7 +646,7 @@ export class FalkorAgent {
       const memory = await this.getMemory();
       const ctxTs = await this.state.storage.get('liveContextTs');
       return corsJson({
-        version: '2.9.0',
+        version: '2.10.0',
         activeSessions: this.sessions.size,
         historyLength: history.length,
         memoryKeys: Object.keys(memory).length,
@@ -771,7 +785,7 @@ export class FalkorAgent {
     const intent = routeIntent(text);
     if (intent) {
       if (AGENT_MODEL_OVERRIDES[intent.agent]) model = AGENT_MODEL_OVERRIDES[intent.agent];
-      const agentData = await callSubAgent(intent.agent, intent.action, text, pin, aiPin);
+      const agentData = await callSubAgent(intent.agent, intent.action, text, pin, aiPin, intent);
       if (agentData) {
         // Special handling for web search: use the answer field prominently
         if (intent.agent === 'web' && agentData.answer) {
@@ -824,47 +838,9 @@ export class FalkorAgent {
 
     if (pendingAgentCtx) ragContext += pendingAgentCtx;
 
-    // Build product-specific system context
-    let productCtxStr = '';
-    if (productContext === 'LessonLab') {
-      const isCmd = text.startsWith('LESSONLAB_');
-      productCtxStr = `
-
-## LessonLab Context
-You are embedded in LessonLab — Paddy's AI lesson planning tool for Williamstown Primary School. You handle structured lesson generation and teaching support. When you receive a LESSONLAB_* command, follow the instructions precisely and return the exact format requested.
-
-### Command reference:
-
-**LESSONLAB_PARSE** — Parse a lesson request into JSON. Return ONLY: {"subject":"...","unit":"...","focus":"...","year_level":"...","duration":"...","school_name":"..."}. subject must be one of: pe, literacy, numeracy, science, visual-art, music, drama, french, digital_tech, hass, wellbeing, performing_arts.
-
-**LESSONLAB_GENERATE** — (handled by /lessons/generate API, not you directly)
-
-**LESSONLAB_AMEND** — Amend an existing lesson JSON per the instruction given. Return ONLY a \`\`\`json ... \`\`\` block with the full updated lesson object preserving all fields.
-
-**LESSONLAB_SUB** — Generate a substitute-teacher-friendly version. Same fields as the lesson plus a "sub_notes" array of 3 practical management bullet points. Simplify all phases so a non-specialist can run the lesson. Return ONLY \`\`\`json ... \`\`\`.
-
-**LESSONLAB_DIFF** — Generate THREE differentiated lesson versions (support/main/extension). Return ONLY \`\`\`json {"support":{...full lesson...},"main":{...},"extension":{...}} \`\`\`. Each version must have all standard lesson fields.
-
-**LESSONLAB_ASSESS** — Generate a structured assessment task. Return ONLY \`\`\`json {"title":"...","type":"...","description":"...","criteria":[{"criterion":"...","emerging":"...","developing":"...","achieved":"..."}],"teacher_notes":"...","student_instructions":"..."} \`\`\` with 3-5 criteria rows.
-
-**LESSONLAB_WARMUPS** — Generate exactly 5 warm-up activities. Return ONLY \`\`\`json {"warmups":[{"title":"...","duration":"...","description":"...","equipment":"...","skills":["..."]},...]} \`\`\` with exactly 5 items matching the lesson's subject, year level and focus.
-
-**LESSONLAB_RISK** — Generate a PE risk assessment. Return ONLY \`\`\`json {"activity":"...","supervision":"...","space":"...","hazards":[{"hazard":"...","likelihood":"Low|Medium|High","severity":"Low|Medium|High","controls":"..."}],"equipment_checks":["..."],"medical_notes":"..."} \`\`\` with 4-6 hazard rows covering realistic PE risks (slips, collisions, equipment misuse, etc.).
-
-**LESSONLAB_NEWSLETTER** — Write a 3-4 sentence parent-friendly paragraph about the lesson. Plain language, no jargon. Start with "In [subject] this week...". Return ONLY the paragraph text — no JSON, no markdown, no quotes.
-
-**LESSONLAB_CURRICULUM** — Identify Victorian Curriculum 2.0 alignment. Return ONLY \`\`\`json {"tags":["HPE - Movement and Physical Activity - FMS","..."],"content_descriptions":[{"code":"VCHPEM123","description":"..."}]} \`\`\` with 2-4 most relevant strand tags and content descriptions with real Vic Curriculum codes.
-
-### General rules for LessonLab:
-- When a LESSONLAB_* command is present, return ONLY the requested format — no preamble, no explanation, no sign-off.
-- All lesson JSON should include: title, li (learning intention), sc (success criteria array), equipment (array), differentiation ({support, extension}), and phase fields appropriate to the subject (warmup, skill_focus, main_activity, cool_down for PE; body for other subjects).
-- Year levels follow Victorian system: Foundation, Year 1–6.
-- School name default: Williamstown Primary School.
-- Duration is in minutes as a string (e.g. "45").
-${isCmd ? '- This message IS a LESSONLAB command — respond with the exact format only.' : '- This is a conversational message in LessonLab — respond helpfully and concisely.'}`;
-    } else if (productContext) {
-      productCtxStr = '\n\nContext: You are embedded in ' + productContext + '. Tailor your answers to this context.';
-    }
+    const productCtxStr = productContext
+      ? '\n\nContext: You are embedded in ' + productContext + '. Tailor your answers to this context.'
+      : '';
 
     // ── 5. Build system prompt with live context injected ────────────────────
     const contextHistory = history.slice(-40).map(h => ({ role: h.role, content: h.content }));
@@ -907,6 +883,13 @@ ${isCmd ? '- This message IS a LESSONLAB command — respond with the exact form
       `- No emojis. Plain text only — no symbols, icons, or emoji in any reply.`,
       `- Match energy: short question → short answer. Complex task → structured reply.`,
       `- Web search results in context (## Web Search Results)? Use them. Never say you can't search.`,
+      `## Engineering rules (ALL projects, non-negotiable):`,
+      `- Root-cause before patching. Read the surrounding code and any nearby comment. If code looks like a workaround, identify what it's masking. Don't remove a workaround until the underlying bug is proven gone.`,
+      `- Verify the EFFECT of every deploy, not the 200 status. Fetch served output. Run the product's checks.py.`,
+      `- Every product has a checks.py at the repo root. Run it post-deploy. Add a check whenever a new bug class is found.`,
+      `- Single source of truth for version: const VERSION at top of worker, every other place reads from it.`,
+      `- If a session feels like solving the same problem again — STOP and root-cause. Don't keep slapping new patches on top.`,
+      `- Full rules: https://github.com/PaddyGallivan/asgard-source/blob/main/docs/ENGINEERING-RULES.md`,
       `## What ${userCtx.name} follows:`,
       `${userCtx.interests.join(' · ')}`,
       systemExtra,
@@ -1053,7 +1036,7 @@ export default {
     }
 
     if (url.pathname === '/health') {
-      return Response.json({ status: 'ok', version: '2.9.0', worker: 'falkor-agent' });
+      return Response.json({ status: 'ok', version: '2.10.0', worker: 'falkor-agent' });
     }
 
     // ── /tasks proxy → falkor-workflows via service binding (no 522 loopback) ──
