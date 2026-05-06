@@ -3,8 +3,8 @@
 > **Engineering rules apply across all products** —
 > read [`docs/ENGINEERING-RULES.md`](ENGINEERING-RULES.md) at session start.
 
-**Vault PIN:** `535554`
-**Get any credential:** `curl -H "X-Pin: 535554" https://asgard-vault.pgallivan.workers.dev/secret/KEY_NAME`
+**Vault PIN:** `<VAULT_PIN>`
+**Get any credential:** `curl -H "X-Pin: <VAULT_PIN>" https://asgard-vault.pgallivan.workers.dev/secret/KEY_NAME`
 
 ---
 
@@ -80,7 +80,7 @@ All 45 tasks complete. Full feature set live at https://clubhouse-e5e.pages.dev
 | **Family Hub** | https://hub.luckdragon.io | v16-p, 14 members, encrypted chats + push + pocket money | https://clubhouse-e5e.pages.dev | 45 tasks live |
 | Carnival Timing | https://carnivaltiming.com | v8.5.2 |
 | Sport Carnival | https://sportcarnival.com.au | draw/results live |
-| Vault | https://asgard-vault.pgallivan.workers.dev | PIN 535554 |
+| Vault | https://asgard-vault.pgallivan.workers.dev | PIN <VAULT_PIN> |
 
 **CF Account:** `a6f47c17811ee2f8b6caeb8f38768c20`
 **D1 (asgard-brain):** `b6275cb4-9c0f-4649-ae6a-f1c2e70e940f`
@@ -139,7 +139,7 @@ def push(path, content_bytes, message, sha=None):
 
 ## Portfolio products (Asgard D1 source of truth)
 
-Full live state: `https://asgard.pgallivan.workers.dev` (PIN 535554) → Products tab
+Full live state: `https://asgard.pgallivan.workers.dev` (PIN <VAULT_PIN>) → Products tab
 
 Key rows updated this session:
 - id=31 Super League Yeah — 97%, opp matchup fixed
