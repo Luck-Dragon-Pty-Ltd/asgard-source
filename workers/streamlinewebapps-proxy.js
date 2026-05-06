@@ -313,7 +313,7 @@ async function verifyStripeSig(rawBody, sigHeader, secret) {
   return v1Entries.some(p => p[1] === sigHex);
 }
 
-async function handleStripeWebhook(request, env) {
+async function handleStripeWebhook(request, env, ctx) {
   const rawBody = await request.text();
   const sig = request.headers.get("Stripe-Signature");
   const secret = env.STRIPE_WEBHOOK_SECRET;
@@ -339,9 +339,14 @@ async function handleStripeWebhook(request, env) {
           body: JSON.stringify({status:"paid", paid_at: new Date().toISOString()})
         });
       } catch(e) {}
-      // Async fire-and-forget: scaffold + auto-deploy preview (Standard/Priority tiers)
+      // Background: scaffold + auto-deploy preview (Standard/Priority tiers).
+      // Use ctx.waitUntil so the Worker keeps running after we return 200 to Stripe.
       if (tier === "Standard" || tier === "Priority") {
-        autoBuildPreview(env, submissionId, title, email, tier).catch(()=>{});
+        if (ctx && typeof ctx.waitUntil === "function") {
+          ctx.waitUntil(autoBuildPreview(env, submissionId, title, email, tier).catch(()=>{}));
+        } else {
+          autoBuildPreview(env, submissionId, title, email, tier).catch(()=>{});
+        }
       }
     }
     // Send admin payment notification
@@ -398,6 +403,63 @@ async function handleStripeWebhook(request, env) {
   return new Response(JSON.stringify({received:true, type: evt.type, id: evt.id}), {status:200, headers:{"Content-Type":"application/json"}});
 }
 
+async function handleBuildSync(request, env, id) {
+  const url = new URL(request.url);
+  if (url.searchParams.get("pin") !== (env.ADMIN_PIN||"")) return new Response(JSON.stringify({error:"Unauthorized"}), {status:401, headers:{...CORS,"Content-Type":"application/json"}});
+  // Run autoBuildPreview synchronously and capture stages
+  const stages = [];
+  try {
+    if (!env.ANTHROPIC_API_KEY) throw new Error("no ANTHROPIC_API_KEY");
+    if (!env.CF_API_TOKEN) throw new Error("no CF_API_TOKEN");
+    if (!env.CF_ACCOUNT_ID) throw new Error("no CF_ACCOUNT_ID (val len: "+(env.CF_ACCOUNT_ID||"").length+")");
+    stages.push("env_ok");
+    const r = await fetch(SUPA_REST+"/streamline_submissions?id=eq."+encodeURIComponent(id)+"&select=*", {headers: SUPA_H});
+    const d = await r.json();
+    const sub = Array.isArray(d) && d[0];
+    if (!sub) throw new Error("submission not found");
+    stages.push("sub_fetched");
+    const prompt = "Generate a single-file Cloudflare Worker (module-style export default { fetch }) that scaffolds an MVP web app for this submission. Output ONLY valid JavaScript wrapped in ```javascript ... ``` fence. Single fetch handler with HTML on /, optional small JSON API; embed HTML inline; only fetch/Response/URL APIs; Tailwind CDN OK; CORS headers; no secrets; small Built by Streamline footer. Title: " + (sub.title||"") + " | Description: " + (sub.description||"") + " | Tier: " + (sub.tier||"Standard");
+    const cr = await fetch("https://api.anthropic.com/v1/messages", {
+      method:"POST",
+      headers:{"x-api-key":env.ANTHROPIC_API_KEY,"anthropic-version":"2023-06-01","Content-Type":"application/json"},
+      body: JSON.stringify({model:"claude-haiku-4-5-20251001", max_tokens:4000, messages:[{role:"user", content: prompt}]})
+    });
+    if (!cr.ok) throw new Error("Claude API "+cr.status+": "+await cr.text());
+    stages.push("claude_ok");
+    const cd = await cr.json();
+    const text = (cd.content && cd.content[0] && cd.content[0].text) || "";
+    const codeMatch = text.match(/```(?:javascript|js)?\s*([\s\S]+?)```/);
+    const code = codeMatch ? codeMatch[1].trim() : text.trim();
+    if (!code || code.length < 100) throw new Error("scaffold too short: "+code.length);
+    stages.push("code_extracted_"+code.length+"b");
+    const slug = slugify(sub.title);
+    const scriptName = "streamline-app-" + slug;
+    const metadata = {main_module:"worker.js",compatibility_date:"2026-05-01",bindings:[]};
+    const boundary = "----stripe-deploy-"+Math.random().toString(36).slice(2,12);
+    const body = "--"+boundary+"\r\nContent-Disposition: form-data; name=\"metadata\"\r\nContent-Type: application/json\r\n\r\n" + JSON.stringify(metadata) + "\r\n--"+boundary+"\r\nContent-Disposition: form-data; name=\"worker.js\"; filename=\"worker.js\"\r\nContent-Type: application/javascript+module\r\n\r\n" + code + "\r\n--"+boundary+"--\r\n";
+    const dr = await fetch("https://api.cloudflare.com/client/v4/accounts/"+env.CF_ACCOUNT_ID+"/workers/scripts/"+scriptName, {
+      method:"PUT",
+      headers:{"Authorization":"Bearer "+env.CF_API_TOKEN, "Content-Type":"multipart/form-data; boundary="+boundary},
+      body
+    });
+    const dj = await dr.json();
+    if (!dj.success) throw new Error("CF deploy failed: "+JSON.stringify(dj.errors));
+    stages.push("deployed_"+scriptName);
+    const hostname = slug + ".streamlinewebapps.com";
+    const domR = await fetch("https://api.cloudflare.com/client/v4/accounts/"+env.CF_ACCOUNT_ID+"/workers/domains", {
+      method:"PUT",
+      headers:{"Authorization":"Bearer "+env.CF_API_TOKEN, "Content-Type":"application/json"},
+      body: JSON.stringify({environment:"production", hostname, service: scriptName, zone_id:"6292327060a0a2209a084cc7f0566e1a"})
+    });
+    const domJ = await domR.json();
+    if (!domJ.success) stages.push("domain_FAIL: "+JSON.stringify(domJ.errors));
+    else stages.push("domain_attached_"+hostname);
+    return new Response(JSON.stringify({ok:true, stages, previewUrl:"https://"+hostname}), {headers:{...CORS,"Content-Type":"application/json"}});
+  } catch(e) {
+    return new Response(JSON.stringify({ok:false, stages, error:e.message, stack:(e.stack||"").slice(0,500)}), {status:500, headers:{...CORS,"Content-Type":"application/json"}});
+  }
+}
+
 async function handleScaffold(request, env, id) {
   const url = new URL(request.url);
   if (url.searchParams.get("pin") !== (env.ADMIN_PIN||"")) return new Response(JSON.stringify({error:"Unauthorized"}), {status:401, headers:{...CORS,"Content-Type":"application/json"}});
@@ -451,13 +513,13 @@ async function handleScaffold(request, env, id) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
 
     const cors = corsFor(request);
     if (request.method === "OPTIONS") return new Response(null, {status:204, headers:cors});
-    if (path === "/health") return new Response(JSON.stringify({ok:true,version:38,sha:"auto-pipeline-honeypot-tdz-fix-2026-05-06"}), {headers:{...cors,...SEC_HEADERS,"Content-Type":"application/json"}});
+    if (path === "/health") return new Response(JSON.stringify({ok:true,version:41,sha:"legal-rewrite-2026-05-06"}), {headers:{...cors,...SEC_HEADERS,"Content-Type":"application/json"}});
     if (path === "/og.png" || path === "/og.svg") {
       const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630"><defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e1b4b"/><stop offset="1" stop-color="#6d28d9"/></linearGradient><linearGradient id="grad" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#a78bfa"/><stop offset="0.5" stop-color="#fbbf24"/><stop offset="1" stop-color="#fff"/></linearGradient></defs><rect width="1200" height="630" fill="url(#bg)"/><circle cx="1050" cy="120" r="180" fill="#a78bfa" opacity="0.12"/><circle cx="120" cy="540" r="220" fill="#fbbf24" opacity="0.08"/><g transform="translate(80, 90)"><rect width="80" height="80" rx="20" fill="#fff" opacity="0.15"/><text x="40" y="58" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="42" font-weight="800" fill="#fff">S</text></g><text x="80" y="280" font-family="Inter,Arial,sans-serif" font-size="36" font-weight="500" fill="#a78bfa">Streamline Webapps</text><text x="80" y="370" font-family="Inter,Arial,sans-serif" font-size="84" font-weight="800" fill="#fff" letter-spacing="-2">Submit an idea.</text><text x="80" y="455" font-family="Inter,Arial,sans-serif" font-size="84" font-weight="800" fill="#fff" letter-spacing="-2">We build it.</text><text x="80" y="540" font-family="Inter,Arial,sans-serif" font-size="84" font-weight="800" fill="url(#grad)" letter-spacing="-2">You earn forever.</text><text x="80" y="595" font-family="Inter,Arial,sans-serif" font-size="22" font-weight="400" fill="#a78bfa" opacity="0.85">25% lifetime revenue share \u00b7 AU \u00b7 streamlinewebapps.com</text></svg>`;
       return new Response(svg, {headers:{...SEC_HEADERS,"Content-Type":"image/svg+xml","Cache-Control":"public,max-age=86400"}});
@@ -538,8 +600,9 @@ export default {
     if (path === "/refunds") return new Response(REFUNDS_HTML, {headers:{...SEC_HEADERS,"Content-Type":"text/html;charset=utf-8","Cache-Control":"public,max-age=86400"}});
     if (path === "/admin") return new Response(ADMIN_HTML, {headers:{...SEC_HEADERS,"Content-Type":"text/html;charset=utf-8","X-Robots-Tag":"noindex,nofollow"}});
     if (path === "/admin/data") return handleAdminData(request, env);
-    if (path === "/stripe/webhook" && request.method === "POST") return handleStripeWebhook(request, env);
+    if (path === "/stripe/webhook" && request.method === "POST") return handleStripeWebhook(request, env, ctx);
     if (path.startsWith("/admin/scaffold/") && request.method === "POST") return handleScaffold(request, env, path.replace("/admin/scaffold/",""));
+    if (path.startsWith("/admin/build/") && request.method === "POST") return handleBuildSync(request, env, path.replace("/admin/build/",""));
     if (path === "/analytics" && request.method === "POST") {
       const ip = request.headers.get("CF-Connecting-IP")||"";
       if (!rateOk(ip, "an", 60)) return new Response("ok", {headers: cors});
@@ -708,74 +771,117 @@ footer p{font-size:13px;color:var(--ink-3);margin:0}
 </nav>
 <main>
   <h1>Privacy Policy</h1>
-  <p class="updated">Last updated: April 2026</p>
+  <p class="updated">Last updated: 2026-05-06 · Version 2.0</p>
 
   <section>
-    <p>Streamline ("we", "us", "our", or "Company") operates the streamlinewebapps.com website and related services. This page informs you of our policies regarding the collection, use, and disclosure of personal data when you use our service.</p>
+    <p>Streamline Webapps ("Streamline", "we", "us") respects your privacy. This Policy explains what personal information we collect, how we use it, who we share it with, how to access or correct it, and how to lodge a complaint.</p>
+    <p>We are bound by the Australian Privacy Principles (APPs) in the Privacy Act 1988 (Cth). If you are accessing Streamline from outside Australia, by using the service you consent to your information being transferred to and processed in Australia.</p>
   </section>
 
   <section>
-    <h2>1. Information We Collect</h2>
-    <p>We collect several types of information for various purposes:</p>
+    <h2>1. Information we collect</h2>
     <ul>
-      <li><strong>Account Information:</strong> When you submit an idea, we collect your name, email address, phone number (optional), app title, category, and idea description.</li>
-      <li><strong>Technical Information:</strong> We collect your IP address (via Cloudflare CF-Connecting-IP header) and generate an anonymous fingerprint for voting purposes.</li>
-      <li><strong>Payment Information:</strong> Payment processing is handled entirely by Stripe. We do not store credit card details.</li>
-      <li><strong>Usage Data:</strong> We track which ideas you vote for, stored locally in your browser.</li>
+      <li><strong>Submission information:</strong> name, email, optional phone, app title, category, and description.</li>
+      <li><strong>Payment information:</strong> handled entirely by Stripe; we don't store card numbers. We receive a Stripe session ID and the amount paid.</li>
+      <li><strong>Voting fingerprint:</strong> a hashed browser fingerprint used to prevent duplicate votes. Not used to identify you across services.</li>
+      <li><strong>Server logs:</strong> IP address (via Cloudflare CF-Connecting-IP), HTTP method, path, referrer, and timestamp.</li>
+      <li><strong>Email correspondence:</strong> any messages you send to <a href="mailto:hello@streamlinewebapps.com">hello@streamlinewebapps.com</a>.</li>
     </ul>
   </section>
 
   <section>
-    <h2>2. How We Use Your Information</h2>
+    <h2>2. How we use your information</h2>
     <ul>
-      <li>To review and potentially build your submitted idea</li>
-      <li>To process payments and manage your account</li>
-      <li>To calculate and pay commissions on app revenue</li>
-      <li>To prevent fraud and abuse through IP-based rate limiting</li>
-      <li>To allow community voting on idea popularity</li>
-      <li>To send you updates about your ideas and the platform</li>
+      <li>To review and build the app you submitted</li>
+      <li>To process payments and pay your revenue share</li>
+      <li>To send transactional emails (build progress, payouts, statements)</li>
+      <li>To prevent fraud and abuse (rate limiting, voting deduplication)</li>
+      <li>To comply with Australian law and respond to lawful requests</li>
     </ul>
   </section>
 
   <section>
-    <h2>3. Australian Privacy Principles (APPs)</h2>
-    <p>We comply with Australia's Privacy Act 1988 and the Australian Privacy Principles. You have the right to:</p>
+    <h2>3. Cookies and similar technologies</h2>
+    <p>Streamline does not set tracking cookies or third-party analytics cookies. We don't use Google Analytics, Facebook Pixel, or similar.</p>
+    <p>What we do use:</p>
     <ul>
-      <li>Request access to personal information we hold about you</li>
-      <li>Ask us to correct inaccurate or incomplete information</li>
-      <li>Request deletion of your data (subject to legal retention requirements)</li>
-      <li>Object to our use of your information</li>
-    </ul>
-    <p>To exercise these rights, contact us at hello@streamlinewebapps.com.</p>
-  </section>
-
-  <section>
-    <h2>4. Data Storage</h2>
-    <p>Your information is stored securely in Supabase (Australia region) and protected with SSL encryption. We retain submission data indefinitely to calculate ongoing commissions. Voting records are stored for 12 months.</p>
-  </section>
-
-  <section>
-    <h2>5. Third-Party Services</h2>
-    <ul>
-      <li><strong>Stripe:</strong> Payment processing. See Stripe's privacy policy at stripe.com/privacy.</li>
-      <li><strong>Supabase:</strong> Data storage. See Supabase's privacy policy at supabase.com/privacy.</li>
-      <li><strong>Cloudflare:</strong> CDN and infrastructure. See Cloudflare's privacy policy at cloudflare.com/privacypolicy.</li>
+      <li><strong>localStorage</strong> in your browser to remember which ideas you've voted on (so you don't double-vote). This data stays on your device.</li>
+      <li><strong>Google Fonts</strong> loaded from fonts.googleapis.com. Google may set its own cookies when serving font files. See <a href="https://policies.google.com/privacy">Google's privacy policy</a>.</li>
+      <li><strong>Cloudflare</strong> sets a small cookie ("__cf_bm") for bot management. See <a href="https://www.cloudflare.com/privacypolicy/">Cloudflare's privacy policy</a>.</li>
     </ul>
   </section>
 
   <section>
-    <h2>6. Security</h2>
-    <p>We implement industry-standard security measures to protect your data. However, no method of transmission over the Internet is 100% secure. While we strive to protect your personal information, we cannot guarantee its absolute security.</p>
+    <h2>4. Australian Privacy Principles</h2>
+    <p>We comply with the 13 Australian Privacy Principles. Highlights:</p>
+    <ul>
+      <li><strong>APP 1 (open management):</strong> this Policy is published openly.</li>
+      <li><strong>APP 5 (notification):</strong> at the time of collection (the submission form), we tell you what we collect and why.</li>
+      <li><strong>APP 6 (use and disclosure):</strong> we use your information for the primary purpose of building your app and managing the marketplace; we do not sell your information.</li>
+      <li><strong>APP 11 (security):</strong> data is stored on Supabase (encrypted at rest, AU region) and Cloudflare. Stripe handles all card data.</li>
+      <li><strong>APP 12 (access):</strong> you may request a copy of any information we hold about you by emailing <a href="mailto:hello@streamlinewebapps.com">hello@streamlinewebapps.com</a>.</li>
+      <li><strong>APP 13 (correction):</strong> you may request correction of inaccurate information at the same address. We will correct or explain why we have not within 30 days.</li>
+    </ul>
   </section>
 
   <section>
-    <h2>7. Changes to This Policy</h2>
-    <p>We may update this privacy policy periodically. We will notify you of any changes by posting the new policy on this page and updating the "Last updated" date.</p>
+    <h2>5. Right to delete (data erasure)</h2>
+    <p>You may request deletion of your personal information at any time by emailing <a href="mailto:hello@streamlinewebapps.com">hello@streamlinewebapps.com</a> from the email address you submitted. We will:</p>
+    <ul>
+      <li>Confirm your request within 7 days.</li>
+      <li>Delete your submission row, voting history, and email correspondence within 30 days.</li>
+      <li>Retain financial records (payments and payouts) for 7 years as required by Australian tax law and the Corporations Act.</li>
+      <li>Anonymise rather than delete any record needed for an active dispute or legal claim until resolution.</li>
+    </ul>
   </section>
 
   <section>
-    <h2>8. Contact Us</h2>
-    <p>If you have any questions about this privacy policy or our practices, please contact us at hello@streamlinewebapps.com.</p>
+    <h2>6. Data retention</h2>
+    <p>We retain submission and account information for the duration of our relationship with you and for 7 years afterwards (Australian tax record requirements). Voting fingerprints are retained for 12 months. Server logs are retained for 90 days.</p>
+  </section>
+
+  <section>
+    <h2>7. Third-party services</h2>
+    <ul>
+      <li><strong>Stripe</strong> (payments) — Ireland/USA. <a href="https://stripe.com/au/privacy">Stripe Privacy</a></li>
+      <li><strong>Cloudflare</strong> (hosting, security, edge caching) — Australia/USA. <a href="https://www.cloudflare.com/privacypolicy/">Cloudflare Privacy</a></li>
+      <li><strong>Supabase</strong> (database, auth) — region: ap-southeast (AU/Singapore). <a href="https://supabase.com/privacy">Supabase Privacy</a></li>
+      <li><strong>Resend</strong> (email delivery) — USA. <a href="https://resend.com/privacy">Resend Privacy</a></li>
+      <li><strong>Anthropic</strong> (AI model) — USA. We do not send your personal information to Anthropic; only the public submission text. <a href="https://www.anthropic.com/legal/privacy">Anthropic Privacy</a></li>
+      <li><strong>Google Fonts</strong> (fonts only). <a href="https://policies.google.com/privacy">Google Privacy</a></li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>8. Cross-border data transfer</h2>
+    <p>Some of our processors are located outside Australia (USA, Ireland, Singapore). By submitting an idea, you consent to your information being transferred to those jurisdictions for the purposes described above. We take reasonable steps to ensure overseas recipients comply with the Australian Privacy Principles.</p>
+  </section>
+
+  <section>
+    <h2>9. EU/UK visitors (GDPR)</h2>
+    <p>If you access Streamline from the European Union or United Kingdom and submit personal information, the General Data Protection Regulation may apply. Our lawful bases for processing are (a) performance of contract (building your app, paying your share), and (b) legitimate interest (preventing fraud, securing the service).</p>
+    <p>You have the right to access, rectify, erase, and port your data, and to lodge a complaint with your supervisory authority. Email <a href="mailto:hello@streamlinewebapps.com">hello@streamlinewebapps.com</a> to exercise these rights.</p>
+  </section>
+
+  <section>
+    <h2>10. Security</h2>
+    <p>We use TLS in transit, encryption at rest at our data processors, HMAC-signed status URLs, no plaintext passwords (we don't have password-based accounts), and rate limiting on every public endpoint. We never email or store full credit card details. Despite reasonable measures, no internet service is 100% secure; we will notify affected users and the OAIC if a notifiable data breach occurs (Notifiable Data Breaches scheme, Privacy Act).</p>
+  </section>
+
+  <section>
+    <h2>11. Children's privacy</h2>
+    <p>Streamline is not intended for users under 18. We do not knowingly collect information from anyone under 18. If you believe we have collected information from a minor, email us and we will delete it.</p>
+  </section>
+
+  <section>
+    <h2>12. Changes to this Policy</h2>
+    <p>We may update this Policy by publishing the revised version with an updated date. Material changes will be notified by email to current customers.</p>
+  </section>
+
+  <section>
+    <h2>13. Complaints and contact</h2>
+    <p>If you have a privacy complaint, email us first at <a href="mailto:hello@streamlinewebapps.com">hello@streamlinewebapps.com</a>. We will respond within 30 days.</p>
+    <p>If you are not satisfied with our response, you may complain to the Office of the Australian Information Commissioner (OAIC) at <a href="https://www.oaic.gov.au">oaic.gov.au</a> or call 1300 363 992.</p>
   </section>
 </main>
 <footer>
@@ -841,95 +947,127 @@ footer p{font-size:13px;color:var(--ink-3);margin:0}
 </nav>
 <main>
   <h1>Terms of Service</h1>
-  <p class="updated">Last updated: April 2026</p>
+  <p class="updated">Last updated: 2026-05-06 · Version 2.0</p>
 
   <section>
-    <p>These Terms of Service ("Terms") govern your use of Streamline, operated by Luck Dragon Pty Ltd ("Company", "we", "us", or "our"). By accessing or using Streamline, you agree to be bound by these Terms.</p>
+    <p>These Terms of Service ("Terms") govern your use of Streamline Webapps ("Streamline", "we", "us", or "our"), operated by Luck Dragon (ABN to be registered) of Melbourne, Victoria, Australia. By accessing or using Streamline, you agree to be bound by these Terms.</p>
   </section>
 
   <section>
-    <h2>1. Service Description</h2>
-    <p>Streamline is a platform where users submit app ideas in exchange for a one-time fee. Community members vote on ideas. Selected ideas are built by our team, and submitters receive a lifetime commission on revenue generated by the app:</p>
+    <h2>1. Service description</h2>
+    <p>Streamline is an Australian web-apps marketplace. You submit an idea, pay a one-time submission fee, and we use AI tools and our own development effort to build a web app from your idea. You receive a 25% revenue share of the app's net revenue for as long as we operate the app, paid quarterly via Australian bank transfer (subject to clauses 3 and 4 below).</p>
+    <p>Tiers (one-time submission fee, GST-inclusive where applicable):</p>
     <ul>
-      <li><strong>Standard ($29 AUD):</strong> 20% lifetime commission, 7-day review window, 30-day refund guarantee</li>
-      <li><strong>Priority ($99 AUD):</strong> 25% lifetime commission, priority queue placement, 14-day refund guarantee</li>
-      <li><strong>Equity ($299 AUD):</strong> 30% lifetime commission, 48-hour build window, 14-day refund guarantee</li>
+      <li><strong>Standard ($29 AUD)</strong> — 25% perpetual revenue share, 1–4 week build, 30-day refund window if build hasn't started.</li>
+      <li><strong>Priority ($99 AUD)</strong> — 25% perpetual revenue share, queue priority, 14-day refund window.</li>
+      <li><strong>Equity ($299 AUD)</strong> — 25% perpetual revenue share via signed Equity Deed, 14-day refund window with 48-hour build-start commitment.</li>
     </ul>
+    <p>All tiers receive the same 25% revenue share rate. Higher tiers buy speed, priority, and a signed contract — not a higher revenue percentage.</p>
   </section>
 
   <section>
-    <h2>2. Intellectual Property</h2>
-    <p><strong>Standard and Priority Tiers:</strong> Streamline retains full ownership of the built application and all source code. You retain the right to the lifetime commission percentage agreed.</p>
-    <p><strong>Equity Tier:</strong> You co-own the application with Streamline and receive co-founder credit in the product. Both parties own the intellectual property equally and may not exploit it separately without consent.</p>
+    <h2>2. Intellectual property</h2>
+    <p>All intellectual property in the built application (code, design, brand, domain, and content) belongs to Streamline. You assign any IP you may otherwise have in the built app to us on creation. In return, you receive a perpetual revenue-share licence (clause 4 below) for the lifetime of the app.</p>
+    <p>You warrant that the idea you submit is your own concept or otherwise free of third-party rights. You indemnify us against any claim that your submission infringes a third party's IP, except to the extent the claim arises from our independent additions you didn't request.</p>
+    <p>You may publicly disclose your involvement (e.g., on LinkedIn) but may not disclose our internal pricing, customer lists, financial figures we share confidentially, or trade secrets.</p>
+    <p>This Streamline marketplace IP arrangement does not constitute, and is not intended to constitute, (a) a financial product as defined in the Corporations Act 2001 (Cth), (b) a managed investment scheme requiring registration with ASIC, (c) shares or securities, or (d) any right to participate in management of Streamline. The arrangement is consideration for your conceptual contribution; it does not create a partnership, joint venture, employment relationship, or fiduciary duty between us.</p>
   </section>
 
   <section>
-    <h2>3. Payment and Refunds</h2>
-    <p>Payments are processed via Stripe using AUD currency. A refund is guaranteed if we do not build your idea within the timeframe specified by your tier (30 days for Standard, 14 days for Priority/Equity).</p>
+    <h2>3. Payment and refunds</h2>
+    <p>Payments are processed by Stripe in Australian dollars (AUD). All listed prices are GST-inclusive where Streamline is GST-registered.</p>
+    <p>Refunds (also see <a href="/refunds">/refunds</a>):</p>
+    <ul>
+      <li>Standard: full refund of the $29 fee if we have not started development within 30 days of payment.</li>
+      <li>Priority: full refund of the $99 fee if we have not started within 14 days.</li>
+      <li>Equity: full refund of the $299 fee if we have not started within 14 days; we commit to starting within 48 hours.</li>
+    </ul>
     <p>Refunds are processed to your original payment method within 5–10 business days of approval.</p>
+    <p><strong>Australian Consumer Law:</strong> Nothing in these Terms or the refund policy excludes, restricts or modifies any consumer guarantee or right under the Australian Consumer Law (Schedule 2 to the Competition and Consumer Act 2010 (Cth)) that cannot lawfully be excluded. Our refund policy applies in addition to your rights under the Australian Consumer Law.</p>
   </section>
 
   <section>
-    <h2>4. Commission Payments</h2>
-    <p>Once your app launches and generates revenue, we calculate your commission monthly. Payments are sent via bank transfer when your balance reaches $50 AUD in a given month, within 5 business days of month end.</p>
-    <p><strong>No guarantee of earnings.</strong> Commission payments are contingent on the app generating revenue. Streamline does not guarantee that any app will generate revenue, reach the $50 AUD payment threshold, or continue operating indefinitely. Revenue figures displayed on our website reflect actual historical results and are not a promise or projection of future earnings. Individual results will vary significantly.</p>
-    <p>You are responsible for declaring commission income for tax purposes in your jurisdiction.</p>
+    <h2>4. Revenue share payments</h2>
+    <p>Net revenue means gross revenue actually received from end users in respect of the app, less Stripe processing fees and chargebacks, refunds issued to end users, GST included in gross revenue (we account for GST separately), and direct hosting/infrastructure costs solely attributable to the app. General overheads, salaries, marketing and shared infrastructure are not deducted.</p>
+    <p>We will pay you 25% of net revenue for the lifetime of the app, paid quarterly by Australian bank transfer (PayID or BSB/Account) within 30 days of quarter-end, provided the accumulated unpaid balance is at least AU$50. Below that threshold the balance rolls forward.</p>
+    <p>You are responsible for declaring this income to the Australian Taxation Office.</p>
+    <p><strong>No guarantee of earnings.</strong> Payments are contingent on the app actually generating revenue. We do not guarantee that any app will generate revenue, reach the $50 payment threshold, or continue operating indefinitely. Individual results will vary significantly. Any historical revenue figures shown on our marketing pages reflect founder portfolio data unless explicitly labelled as customer-generated; the customer marketplace is launching with our first paid customer in 2026.</p>
+    <p>We may discontinue the app if it generates less than $50 net revenue per month for 6 consecutive months, with 30 days written notice. Accrued unpaid amounts remain payable.</p>
   </section>
 
   <section>
-    <h2>5. Submission Requirements</h2>
+    <h2>5. Submission requirements</h2>
     <p>By submitting an idea, you certify that:</p>
     <ul>
-      <li>You own or have rights to the idea you're submitting</li>
-      <li>The idea does not infringe on third-party intellectual property</li>
-      <li>The information you provide is accurate and truthful</li>
-      <li>You are of legal age (18+) and eligible to enter into this agreement</li>
+      <li>You are at least 18 years old and legally able to enter into this agreement.</li>
+      <li>You own or have rights to the idea, and the idea does not infringe a third party's intellectual property, trade-mark, patent, copyright, or contractual restriction.</li>
+      <li>The information you provide is accurate and truthful.</li>
+      <li>You will not, within 24 months of submission, build, commission, or operate a substantially similar product targeting the same customer problem in the same market segment.</li>
     </ul>
   </section>
 
   <section>
-    <h2>6. Voting and Community</h2>
-    <p>Ideas are ranked by community votes. Each user can vote once per idea. Voting is anonymous but tied to a browser fingerprint to prevent duplicate votes. We may disqualify ideas that violate these terms or contain illegal, offensive, or defamatory content.</p>
+    <h2>6. Marketplace voting</h2>
+    <p>Submitted ideas may be displayed publicly for community voting. Each visitor may vote once per idea. Votes are anonymous but tied to a browser fingerprint to prevent duplicates. We may disqualify ideas that violate these Terms.</p>
   </section>
 
   <section>
-    <h2>7. Prohibited Content</h2>
-    <p>Ideas must not contain:</p>
+    <h2>7. Prohibited content</h2>
+    <p>Submitted ideas must not contain:</p>
     <ul>
       <li>Illegal activity or content that violates Australian law</li>
       <li>Hate speech, discrimination, or harassment</li>
-      <li>Explicit sexual or violent content</li>
-      <li>Misinformation or scam-related schemes</li>
+      <li>Explicit sexual or violent content involving real people</li>
+      <li>Content sexualising minors (zero tolerance)</li>
+      <li>Misinformation or scam schemes</li>
       <li>Infringement of third-party rights</li>
+      <li>Content designed to defame, harass, or stalk a person</li>
     </ul>
-    <p>We reserve the right to reject or remove any idea that violates these standards without refund.</p>
+    <p>We may reject or remove any idea that violates these standards. If we reject within 14 days of payment, you receive a full refund (clause 3); if we discover a violation later, you may forfeit the submission fee at our discretion.</p>
   </section>
 
   <section>
-    <h2>8. Governing Law</h2>
-    <p>These Terms are governed by the laws of Victoria, Australia, and you agree to the exclusive jurisdiction of courts in Victoria.</p>
+    <h2>8. Communications consent (Spam Act)</h2>
+    <p>By submitting an idea, you consent to receive transactional and product-update communications from us at the email address you provide. Examples include build progress, payouts, and statement of account. You may withdraw consent for non-transactional emails at any time by emailing <a href="mailto:hello@streamlinewebapps.com">hello@streamlinewebapps.com</a> or replying with "unsubscribe". This consent is granted under the Spam Act 2003 (Cth).</p>
   </section>
 
   <section>
-    <h2>9. Limitation of Liability</h2>
-    <p>To the extent permitted by law, Luck Dragon and Streamline are not liable for indirect, incidental, or consequential damages, including lost profits or revenue. Our total liability to you for any claim arising from these Terms or your use of Streamline shall not exceed the amount you paid to submit your idea.</p>
-    <p>Nothing in these Terms excludes, restricts, or modifies any right or remedy you may have under the Australian Consumer Law, including any consumer guarantee that cannot be excluded by law.</p>
+    <h2>9. Privacy</h2>
+    <p>Your personal information is handled in accordance with our <a href="/privacy">Privacy Policy</a>. We are bound by the Australian Privacy Principles in the Privacy Act 1988 (Cth).</p>
   </section>
 
   <section>
-    <h2>10. Force Majeure</h2>
-    <p>Streamline will not be in breach of these Terms if we are unable to perform our obligations due to circumstances beyond our reasonable control, including but not limited to: natural disasters, acts of government, pandemic, significant technical failure, or third-party platform outages (including AI model providers, payment processors, or cloud infrastructure).</p>
-    <p>If a force majeure event prevents us from building your idea within the refund window for your tier, we will notify you and offer either: (a) an extended build timeline with your consent, or (b) a full refund of your submission fee.</p>
+    <h2>10. Limitation of liability</h2>
+    <p>To the extent permitted by law, our total aggregate liability under these Terms is capped at the greater of (a) the submission fee you paid, or (b) the total revenue share paid to you in the 12 months preceding the claim.</p>
+    <p>We are not liable for indirect, consequential, lost-profit, or speculative damages.</p>
+    <p>Nothing in this clause limits or excludes (a) any right or guarantee under the Australian Consumer Law that cannot lawfully be excluded, (b) liability for fraud or fraudulent misrepresentation, or (c) liability for personal injury or death caused by negligence.</p>
   </section>
 
   <section>
-    <h2>11. Changes to Terms</h2>
-    <p>We may update these Terms at any time. Continued use of Streamline constitutes acceptance of updated Terms.</p>
+    <h2>11. Force majeure</h2>
+    <p>We are not in breach of these Terms if we cannot perform our obligations due to circumstances beyond our reasonable control, including natural disasters, government action, pandemic, significant technical failure, or third-party platform outages (AI model providers, payment processors, cloud infrastructure).</p>
   </section>
 
   <section>
-    <h2>12. Contact</h2>
-    <p>For questions about these Terms, contact us at hello@streamlinewebapps.com.</p>
+    <h2>12. Governing law and dispute resolution</h2>
+    <p>These Terms are governed by the laws of Victoria, Australia. The exclusive jurisdiction for any dispute is the courts of Victoria.</p>
+    <p>Before commencing legal proceedings, the parties will attempt good-faith negotiation within 21 days, and if unresolved, mediation through the Resolution Institute or comparable Australian mediator. This clause does not limit your rights to lodge complaints with the ACCC, ASIC, the Australian Information Commissioner, or any other regulator.</p>
+  </section>
+
+  <section>
+    <h2>13. Changes to Terms</h2>
+    <p>We may update these Terms by posting the revised version on this page with an updated date. Material changes affecting your existing submissions or payouts will be notified by email. Your continued use of Streamline after changes are posted constitutes acceptance.</p>
+  </section>
+
+  <section>
+    <h2>14. Severability and entire agreement</h2>
+    <p>If any clause is held unenforceable, the remainder of these Terms continues in force. These Terms (together with the Privacy Policy, Refund Policy, and any signed Equity Deed) form the entire agreement between us.</p>
+  </section>
+
+  <section>
+    <h2>15. Contact</h2>
+    <p>Email: <a href="mailto:hello@streamlinewebapps.com">hello@streamlinewebapps.com</a></p>
+    <p>Streamline Webapps · Melbourne, Australia</p>
   </section>
 </main>
 <footer>
@@ -997,68 +1135,72 @@ footer p{font-size:13px;color:var(--ink-3);margin:0}
 </nav>
 <main>
   <h1>Refund Policy</h1>
-  <p class="updated">Last updated: April 2026</p>
+  <p class="updated">Last updated: 2026-05-06 · Version 2.0</p>
 
   <section>
-    <p>At Streamline, we stand behind our commitment to build your idea if it's selected by the community. This policy outlines when and how refunds are provided.</p>
+    <p style="background:#fffbeb;border:1px solid #fde68a;padding:14px 18px;border-radius:10px;color:#92400e"><strong>Australian Consumer Law:</strong> Nothing in this policy excludes, restricts, or modifies any consumer guarantee or right under the Australian Consumer Law (Schedule 2 to the Competition and Consumer Act 2010 (Cth)) that cannot lawfully be excluded. Our refund commitments below apply <em>in addition to</em> your rights under the ACL.</p>
   </section>
 
   <section>
-    <h2>Refund Guarantees by Tier</h2>
+    <h2>Refund guarantees by tier</h2>
 
     <div class="tier-box">
-      <h3>Standard Tier ($29 AUD)</h3>
-      <p><strong>30-day refund guarantee.</strong> If we have not begun development on your idea within 30 days of your submission, you are eligible for a full refund of your $29 AUD submission fee.</p>
-      <p><strong>Conditions:</strong> Your idea must have been submitted in good faith and not violate our Terms of Service.</p>
+      <h3>Standard ($29 AUD) — 30-day refund</h3>
+      <p>Full refund of the $29 submission fee if we have not started development on your idea within 30 days of payment. Conditions: idea submitted in good faith and not in breach of our Terms of Service.</p>
     </div>
 
     <div class="tier-box">
-      <h3>Priority Tier ($99 AUD)</h3>
-      <p><strong>14-day refund guarantee.</strong> If we have not begun development on your idea within 14 days of your submission, you are eligible for a full refund of your $99 AUD submission fee.</p>
-      <p><strong>Conditions:</strong> Your idea must receive enough community votes to be queued for development. If insufficient votes are received, we will notify you by day 14 and process a refund.</p>
+      <h3>Priority ($99 AUD) — 14-day refund</h3>
+      <p>Full refund of the $99 submission fee if we have not started development within 14 days of payment.</p>
     </div>
 
     <div class="tier-box">
-      <h3>Equity Tier ($299 AUD)</h3>
-      <p><strong>14-day refund guarantee.</strong> We commit to beginning development within 48 hours. If development has not begun within 48 hours, we will contact you to reschedule. If development cannot start within 14 days, a full refund of $299 AUD is processed.</p>
-      <p><strong>Conditions:</strong> Equity tier submissions are prioritized and built with guaranteed timelines.</p>
+      <h3>Equity ($299 AUD) — 14-day refund + 48-hour build-start commitment</h3>
+      <p>We commit to starting development within 48 hours of payment. If we have not started within 14 days, full refund of the $299 fee is processed.</p>
     </div>
   </section>
 
   <section>
-    <h2>How to Request a Refund</h2>
-    <p>To request a refund, email hello@streamlinewebapps.com with:</p>
+    <h2>How to request a refund</h2>
+    <p>Email <a href="mailto:hello@streamlinewebapps.com">hello@streamlinewebapps.com</a> with the subject line "Refund request — submission #ID" (your submission ID is in the email you received after paying, or visible on your /status page). Include the reason for the request.</p>
+    <p>We will acknowledge within 2 business days and process eligible refunds to your original payment method within 5–10 business days.</p>
+  </section>
+
+  <section>
+    <h2>Refund processing</h2>
+    <p>Refunds are issued to the original Stripe payment method (card or other). Your bank may take an additional 3–5 business days to reflect the refund.</p>
+  </section>
+
+  <section>
+    <h2>What does <em>not</em> qualify for refund</h2>
     <ul>
-      <li>Your submitted idea title</li>
-      <li>The email address associated with your submission</li>
-      <li>The reason for your refund request</li>
+      <li>Once we have started development on your idea (passed the per-tier window above).</li>
+      <li>Submissions in breach of our Terms (illegal content, third-party IP infringement, hate speech, etc.).</li>
+      <li>Change of mind after the per-tier window has passed and development has begun.</li>
+      <li>Dissatisfaction with the marketing performance of a launched app — revenue share is contingent on actual sales, which we do not guarantee.</li>
     </ul>
-    <p>We will review your request and respond within 2 business days.</p>
+    <p>For any of the above, the per-tier window has lapsed and we have begun the work — the submission fee is non-refundable.</p>
   </section>
 
   <section>
-    <h2>Refund Processing</h2>
-    <p>Approved refunds are processed to your original payment method within 5–10 business days. If your payment was made via Stripe, the refund will appear as a credit to the card or payment method used.</p>
+    <h2>Revenue share / commission disputes</h2>
+    <p>Quarterly statements are emailed to you. If you believe a payout is incorrect, email <a href="mailto:hello@streamlinewebapps.com">hello@streamlinewebapps.com</a> within 30 days of receiving the statement. We will provide source documents (Stripe transaction IDs, gross revenue, deductions) and correct any error within 30 days of confirming.</p>
   </section>
 
   <section>
-    <h2>What Does NOT Qualify for Refund</h2>
+    <h2>Australian Consumer Law guarantees</h2>
+    <p>Our service comes with consumer guarantees that cannot be excluded under the Australian Consumer Law, including (where applicable):</p>
     <ul>
-      <li>Ideas rejected due to Terms of Service violations (illegal, offensive, or defamatory content)</li>
-      <li>Requests submitted more than 30 days after submission (beyond the guarantee window)</li>
-      <li>Ideas that have already been built and shipped</li>
-      <li>Refunds requested after the refund period has expired</li>
+      <li>The service will be provided with due care and skill.</li>
+      <li>The service will be reasonably fit for any disclosed purpose.</li>
+      <li>The service will be supplied within a reasonable time.</li>
     </ul>
-  </section>
-
-  <section>
-    <h2>Commission Disputes</h2>
-    <p>If you believe commission calculations are incorrect, contact us at hello@streamlinewebapps.com within 30 days of the relevant payment. We will audit the transaction and either explain the calculation or issue a corrected payment.</p>
+    <p>If we fail to meet a consumer guarantee, you may be entitled to additional remedies (a re-supply or refund) regardless of the per-tier window above. Contact us first; if unresolved, you may contact the ACCC or your state consumer affairs office.</p>
   </section>
 
   <section>
     <h2>Questions?</h2>
-    <p>If you have questions about this refund policy, reach out to hello@streamlinewebapps.com and we'll be happy to help.</p>
+    <p>Email <a href="mailto:hello@streamlinewebapps.com">hello@streamlinewebapps.com</a>.</p>
   </section>
 </main>
 <footer>
