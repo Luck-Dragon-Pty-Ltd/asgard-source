@@ -195,6 +195,7 @@ export default {
     if (request.method === "OPTIONS") return new Response(null, {status:204, headers:cors});
     if (path === "/health") return new Response(JSON.stringify({ok:true,version:32,sha:"hardening-2026-05-06"}), {headers:{...cors,...SEC_HEADERS,"Content-Type":"application/json"}});
     if (path === "/robots.txt") return new Response("User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /admin/\nDisallow: /analytics\nSitemap: https://streamlinewebapps.com/sitemap.xml\n", {headers:{"Content-Type":"text/plain;charset=utf-8","Cache-Control":"public,max-age=3600",...SEC_HEADERS}});
+    if (path === "/favicon.ico") return new Response('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#6d28d9"/><text x="16" y="22" text-anchor="middle" font-family="Arial,sans-serif" font-size="20" font-weight="800" fill="#fff">S</text></svg>', {headers:{"Content-Type":"image/svg+xml","Cache-Control":"public,max-age=86400",...SEC_HEADERS}});
     if (path === "/sitemap.xml") return new Response('<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n  <url><loc>https://streamlinewebapps.com/</loc><priority>1.0</priority></url>\n  <url><loc>https://streamlinewebapps.com/privacy</loc><priority>0.4</priority></url>\n  <url><loc>https://streamlinewebapps.com/terms</loc><priority>0.4</priority></url>\n  <url><loc>https://streamlinewebapps.com/refunds</loc><priority>0.4</priority></url>\n</urlset>\n', {headers:{"Content-Type":"application/xml;charset=utf-8","Cache-Control":"public,max-age=3600",...SEC_HEADERS}});
     if (path === "/stats" && request.method === "GET") {
       // Real stats from DB, replaces the upstream proxy
@@ -767,6 +768,7 @@ const HTML = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta 
 <title>Streamline — Submit an idea. We build it. You earn forever.</title>
 <meta name="description" content="Turn your app idea into recurring revenue. We build with AI, you earn 25% of every sale — forever."/>
 <link rel="canonical" href="https://streamlinewebapps.com/"/>
+<link rel="icon" type="image/svg+xml" href="/favicon.ico"/>
 <meta property="og:title" content="Streamline — Submit an idea. We build it. You earn forever."/>
 <meta property="og:description" content="Turn your app idea into recurring revenue. We build with AI, you earn 25% of every sale — forever."/>
 <meta property="og:url" content="https://streamlinewebapps.com/"/>
