@@ -521,7 +521,7 @@ export default {
           body: JSON.stringify({ model: 'haiku', message: briefPrompt, use_tools: false })
         });
         const llmData = await llmRes.json();
-        const brief = llmData.response || llmData.text || llmData.content || llmData.message || 'LLM unavailable.';
+        const brief = llmData.reply || llmData.response || llmData.text || llmData.content || llmData.message || 'LLM unavailable.';
         return Response.json({
           brief,
           raw: { agent: agentHealth, workflows: wfHealth, brain: brainHealth },
