@@ -15,7 +15,7 @@
 //
 // Bindings: DB (asgard-prod), PROJECTS_DB (project-hub-db), RESEND_API_KEY, AGENT_PIN, WEB_SERVICE (falkor-web)
 
-const VERSION = '3.11.0';
+const VERSION = '3.12.0';
 
 // AI_WORKER_PIN getter — asgard-ai uses a separate PIN from AGENT_PIN
 function getAiPin(env) {
@@ -389,18 +389,18 @@ function getPaddyState() {
   return { mode: 'free', quiet: false, label: 'free' };
 }
 
-// ── Send Telegram message (fires when TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID set) ─
+// ── Send Telegram message via falkor-telegram worker ──────────────────────────
 async function sendTelegram(env, text) {
-  const token  = env.TELEGRAM_BOT_TOKEN;
-  const chatId = env.TELEGRAM_CHAT_ID;
-  if (!token || !chatId) return false;
   try {
-    const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    const tgUrl = (env.TELEGRAM_URL || 'https://falkor-telegram.luckdragon.io') + '/send';
+    const r = await fetch(tgUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML' }),
+      headers: { 'Content-Type': 'application/json', 'X-Pin': env.AGENT_PIN || '' },
+      body: JSON.stringify({ text, target: 'paddy', parse_mode: 'HTML' }),
     });
-    return r.ok;
+    if (!r.ok) return false;
+    const d = await r.json().catch(() => ({}));
+    return !!d.message_id;
   } catch { return false; }
 }
 
