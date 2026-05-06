@@ -1,10 +1,10 @@
-// asgard-tools v1.4.0
+// asgard-tools v1.4.3
 // Agentic tool-calling worker — gives Claude in Asgard real infrastructure access
-// v1.4.0: fix /brief PIN split (AGENT_PIN for falkor-* health, AI_PIN for asgard-ai)
+// v1.4.3: remove llm_debug field; AGENT_PIN now consistent across all sub-calls
 // Deploy as worker script name: asgard-tools
 // Required bindings: CF_API_TOKEN (secret, optional — falls back to vault)
 
-const VERSION = '1.4.0';
+const VERSION = '1.4.3';
 const ACCOUNT_ID = 'a6f47c17811ee2f8b6caeb8f38768c20';
 
 const SYSTEM_PROMPT = `You are Asgard, Luck Dragon's infrastructure AI. You have REAL tools — when Paddy asks you to change something, you actually do it. Don't describe what to do; do it.
@@ -499,8 +499,7 @@ export default {
         return Response.json({ error: 'Forbidden' }, { status: 403, headers: cors });
       }
       try {
-        const AGENT_PIN = env.AGENT_PIN;      // falkor-* workers auth with AGENT_PIN
-        const AI_PIN = await getPin(env);        // asgard-ai auth with PADDY_PIN
+        const AGENT_PIN = env.AGENT_PIN;      // all /brief sub-calls use AGENT_PIN
         const [agentRes, wfRes, toolsRes] = await Promise.allSettled([
           fetch('https://falkor-agent.luckdragon.io/health', { headers: { 'X-Pin': AGENT_PIN } }).then(r => r.json()),
           fetch('https://falkor-workflows.luckdragon.io/health', { headers: { 'X-Pin': AGENT_PIN } }).then(r => r.json()),
@@ -518,7 +517,7 @@ export default {
           '\nBrain: ' + JSON.stringify(brainHealth);
         const llmRes = await fetch('https://asgard-ai.luckdragon.io/chat/smart', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Pin': AI_PIN },
+          headers: { 'Content-Type': 'application/json', 'X-Pin': AGENT_PIN },
           body: JSON.stringify({ model: 'haiku', message: briefPrompt, use_tools: false })
         });
         const llmData = await llmRes.json();
