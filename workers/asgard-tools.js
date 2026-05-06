@@ -4,7 +4,7 @@
 // Deploy as worker script name: asgard-tools
 // Required bindings: CF_API_TOKEN (secret, optional — falls back to vault)
 
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 const ACCOUNT_ID = 'a6f47c17811ee2f8b6caeb8f38768c20';
 
 const SYSTEM_PROMPT = `You are Asgard, Luck Dragon's infrastructure AI. You have REAL tools — when Paddy asks you to change something, you actually do it. Don't describe what to do; do it.
@@ -509,25 +509,19 @@ export default {
         const wfHealth = wfRes.status === 'fulfilled' ? wfRes.value : { error: 'unreachable' };
         const brainHealth = toolsRes.status === 'fulfilled' ? toolsRes.value : { error: 'unreachable' };
 
-        const anthropicKey = await getAnthropicKey(env);
-        const llmRes = await fetch('https://gateway.ai.cloudflare.com/v1/a6f47c17811ee2f8b6caeb8f38768c20/falkor/anthropic/v1/messages', {
+        // Route through asgard-ai (holds ANTHROPIC_API_KEY binding + CF AI Gateway)
+        const briefPrompt = 'Give a concise Falkor status brief (4-6 bullets). Flag anything wrong. Today: ' +
+          new Date().toLocaleDateString('en-AU', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) +
+          '\n\nAgent: ' + JSON.stringify(agentHealth) +
+          '\nWorkflows: ' + JSON.stringify(wfHealth) +
+          '\nBrain: ' + JSON.stringify(brainHealth);
+        const llmRes = await fetch('https://asgard-ai.luckdragon.io/chat/smart', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01' },
-          body: JSON.stringify({
-            model: 'claude-haiku-4-5-20251001',
-            max_tokens: 512,
-            messages: [{
-              role: 'user',
-              content: 'Give a concise Falkor status brief (4-6 bullets). Flag anything wrong. Today: ' +
-                new Date().toLocaleDateString('en-AU', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) +
-                '\n\nAgent: ' + JSON.stringify(agentHealth) +
-                '\nWorkflows: ' + JSON.stringify(wfHealth) +
-                '\nBrain: ' + JSON.stringify(brainHealth)
-            }]
-          })
+          headers: { 'Content-Type': 'application/json', 'X-Pin': APIN },
+          body: JSON.stringify({ model: 'haiku', message: briefPrompt, use_tools: false })
         });
         const llmData = await llmRes.json();
-        const brief = llmData.content?.[0]?.text ?? 'LLM unavailable.';
+        const brief = llmData.response || llmData.text || llmData.content || llmData.message || 'LLM unavailable.';
         return Response.json({
           brief,
           raw: { agent: agentHealth, workflows: wfHealth, brain: brainHealth },
