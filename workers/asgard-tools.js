@@ -1,6 +1,6 @@
-// asgard-tools v1.0.2
+// asgard-tools v1.3.0
 // Agentic tool-calling worker — gives Claude in Asgard real infrastructure access
-// v1.0.2: routes Claude API calls through asgard-ai proxy (which holds the ANTHROPIC_API_KEY binding)
+// v1.3.0: all Claude calls via CF AI Gateway (no direct Anthropic), /brief endpoint added
 // Deploy as worker script name: asgard-tools
 // Required bindings: CF_API_TOKEN (secret, optional — falls back to vault)
 
@@ -343,7 +343,7 @@ async function handleChatSmart(request, env, corsHeaders) {
 
     // Call Anthropic API directly — key read from vault
     const anthropicKey = await getAnthropicKey(env);
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
+    const r = await fetch('https://gateway.ai.cloudflare.com/v1/a6f47c17811ee2f8b6caeb8f38768c20/falkor/anthropic/v1/messages', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -485,6 +485,56 @@ export default {
         return Response.json({ deployed: result.ok === true, ...result }, { headers: cors });
       } catch (e) {
         return Response.json({ error: 'Deploy failed', detail: e.message }, { status: 500, headers: cors });
+      }
+    }
+
+
+    // /brief — morning brief: falkor-agent health, workflows health, worker fleet
+    // GET /brief?pin=<VAULT_PIN>  OR  X-Pin header
+    if (pathname === '/brief' && request.method === 'GET') {
+      const qpin = new URL(request.url).searchParams.get('pin');
+      const pin = qpin || request.headers.get('X-Pin');
+      const validPins = [env.VAULT_PIN || '535554', env.AGENT_PIN].filter(Boolean);
+      if (!validPins.includes(pin)) {
+        return Response.json({ error: 'Forbidden' }, { status: 403, headers: cors });
+      }
+      try {
+        const APIN = env.AGENT_PIN;
+        const [agentRes, wfRes, toolsRes] = await Promise.allSettled([
+          fetch('https://falkor-agent.luckdragon.io/health', { headers: { 'X-Pin': APIN } }).then(r => r.json()),
+          fetch('https://falkor-workflows.luckdragon.io/health', { headers: { 'X-Pin': APIN } }).then(r => r.json()),
+          fetch('https://falkor-brain.luckdragon.io/health', { headers: { 'X-Pin': APIN } }).then(r => r.json())
+        ]);
+        const agentHealth = agentRes.status === 'fulfilled' ? agentRes.value : { error: 'unreachable' };
+        const wfHealth = wfRes.status === 'fulfilled' ? wfRes.value : { error: 'unreachable' };
+        const brainHealth = toolsRes.status === 'fulfilled' ? toolsRes.value : { error: 'unreachable' };
+
+        const anthropicKey = await getAnthropicKey(env);
+        const llmRes = await fetch('https://gateway.ai.cloudflare.com/v1/a6f47c17811ee2f8b6caeb8f38768c20/falkor/anthropic/v1/messages', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01' },
+          body: JSON.stringify({
+            model: 'claude-haiku-4-5-20251001',
+            max_tokens: 512,
+            messages: [{
+              role: 'user',
+              content: 'Give a concise Falkor status brief (4-6 bullets). Flag anything wrong. Today: ' +
+                new Date().toLocaleDateString('en-AU', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) +
+                '\n\nAgent: ' + JSON.stringify(agentHealth) +
+                '\nWorkflows: ' + JSON.stringify(wfHealth) +
+                '\nBrain: ' + JSON.stringify(brainHealth)
+            }]
+          })
+        });
+        const llmData = await llmRes.json();
+        const brief = llmData.content?.[0]?.text ?? 'LLM unavailable.';
+        return Response.json({
+          brief,
+          raw: { agent: agentHealth, workflows: wfHealth, brain: brainHealth },
+          generated_at: new Date().toISOString()
+        }, { headers: cors });
+      } catch (e) {
+        return Response.json({ error: 'Brief failed', detail: e.message }, { status: 500, headers: cors });
       }
     }
 
