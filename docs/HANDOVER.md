@@ -8,6 +8,31 @@
 
 ---
 
+## Cowork / Claude file delivery rules (2026-05-06)
+
+These rules are enforced in every Cowork session and stored in persistent memory.
+
+### Binary deliverables (PDF, DOCX, PPTX, XLSX, images)
+→ **PowerShell `Copy-Item` to the workspace Drive folder** (e.g. `G:\My Drive\Luck Dragon\`).  
+→ Tell Paddy the filename so he can find it in Drive or his local Sync folder.
+
+```powershell
+Copy-Item $outPath 'G:\My Drive\Luck Dragon\MyFile.pdf' -Force
+```
+
+> ⚠️ **Drive letter is per-machine.** Read the workspace path from the system prompt each session — never hardcode `G:\`.
+
+### Code / configs / handover docs
+→ **GitHub only.** Never copy to Drive.
+
+### What NOT to use
+- ❌ `present_files` — errors with "not accessible on the user's computer"
+- ❌ `computer://` links — show "Failed to load local file" in the app
+- ❌ Bash sandbox path `/sessions/<id>/mnt/Luck Dragon/` — this is NOT `G:\My Drive\Luck Dragon\` and files written there are invisible to Paddy
+- ❌ Desktop or Downloads — Paddy didn't ask for it there
+
+---
+
 ## What we did this session (Session 6 — 2026-05-05)
 
 ### LessonLab — Compliance & UX fixes (PaddyGallivan/lessonlab)
