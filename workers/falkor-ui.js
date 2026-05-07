@@ -1780,7 +1780,7 @@ function PEPanel({ pin }) {
     // Week results
     weekData && React.createElement('div', { style: cardStyle },
       React.createElement('div', { style: { fontSize: 15, fontWeight: 700, marginBottom: 2 } }, weekData.theme),
-      React.createElement('div', { style: { fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 } }, weekData.year_level + ' — ' + weekData.duration + ' min — week of ' + weekData.week_of),
+      React.createElement('div', { style: { fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 } }, (weekData.year_level || '?') + ' — ' + (weekData.duration || '?') + ' min — week of ' + (weekData.week_of || '?')),
       React.createElement('div', { style: { display: 'flex', flexWrap: 'wrap', marginBottom: 14 } },
         (weekData.days || []).map(function(day, i) {
           return React.createElement('button', { key: i, style: tabStyle(activeDay === i), onClick: function() { setActiveDay(i); } }, day.name || ('Day ' + (i+1)));
@@ -1807,7 +1807,7 @@ function PEPanel({ pin }) {
     // Single lesson result
     singleData && React.createElement('div', { style: cardStyle },
       React.createElement('div', { style: { fontSize: 14, fontWeight: 700, marginBottom: 8 } },
-        'Single Lesson — ' + singleData.year_level + ' (' + singleData.duration + ' min, ' + (singleData.outdoor ? 'Outdoor' : 'Indoor') + ')'
+        'Single Lesson — ' + (singleData.year_level || '?') + ' (' + (singleData.duration || '?') + ' min, ' + (singleData.outdoor ? 'Outdoor' : 'Indoor') + ')'
       ),
       singleData.weather_note && React.createElement('div', { style: { fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 } }, singleData.weather_note),
       React.createElement('pre', { style: { fontSize: 12, whiteSpace: 'pre-wrap', lineHeight: 1.6, color: 'var(--text)', margin: 0 } }, singleData.plan),
