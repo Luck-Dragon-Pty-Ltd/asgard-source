@@ -201,7 +201,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .app{display:flex;height:100dvh;position:relative;overflow:hidden}
 .sidebar{position:fixed;left:0;top:0;bottom:0;width:var(--sidebar-w);background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;z-index:100;transform:translateX(-100%);transition:transform .22s cubic-bezier(.4,0,.2,1)}
 .sidebar.open{transform:translateX(0);box-shadow:var(--shadow)}
-@media(min-width:900px){
+@media(min-width:900px){.hamburger-btn{display:none !important}
   .sidebar{transform:translateX(0)}
   .main{margin-left:var(--sidebar-w)}
   .sidebar-scrim{display:none !important}
@@ -230,6 +230,11 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 
 .sidebar-footer{padding:10px 12px;border-top:1px solid var(--border);display:flex;align-items:center;gap:8px}
 .user-pill{flex:1;font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sidebar-nav{display:flex;flex-direction:column;gap:2px;padding:8px 10px;border-top:1px solid var(--border)}
+.sidebar-nav-btn{display:flex;align-items:center;gap:10px;background:none;border:none;color:var(--text);padding:8px 10px;border-radius:8px;font-size:13px;cursor:pointer;width:100%;text-align:left;transition:background .15s}
+.sidebar-nav-btn:hover{background:var(--surface2)}
+.sidebar-nav-btn.active{background:var(--accent);color:#fff}
+.sidebar-nav-btn .nav-icon{font-size:16px;width:20px;text-align:center}
 .icon-btn{background:none;border:none;cursor:pointer;color:var(--muted);font-size:18px;padding:5px 7px;border-radius:7px;line-height:1;transition:background .1s,color .1s;flex-shrink:0}
 .icon-btn:hover{background:rgba(255,255,255,.08);color:var(--text)}
 
@@ -453,10 +458,13 @@ function renderMD(text) {
   var BK = '\x60';
   var codeBlockRe = new RegExp(BK+BK+BK+'(\\w*)\\n?([\\s\\S]*?)'+BK+BK+BK, 'g');
   var inlineCodeRe = new RegExp(BK+'([^'+BK+']+)'+BK, 'g');
+  var _codeBlocks = [];
   var s = text
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(codeBlockRe, function(_, lang, code) {
-      return '<pre><button class="copy-code-btn" onclick="window.copyCode(this)">Copy</button><code class="lang-'+(lang||'')+'">' + code.trim() + '</code></pre>';
+      var idx = _codeBlocks.length;
+      _codeBlocks.push('<pre><button class="copy-code-btn" onclick="window.copyCode(this)">Copy</button><code class="lang-'+(lang||'')'+">' + code.trim() + '</code></pre>');
+      return '\x01CB' + idx + '\x01';
     })
     .replace(inlineCodeRe, '<code>$1</code>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
@@ -468,6 +476,7 @@ function renderMD(text) {
     .replace(/^[-*] (.+)$/gm, '<div style="padding-left:14px;margin:1px 0">• $1</div>')
     .replace(/^(\d+)\. (.+)$/gm, '<div style="padding-left:14px;margin:1px 0">$1. $2</div>')
     .replace(/\n/g, '<br>');
+    .replace(/\x01CB(\d+)\x01/g, function(_, i) { return _codeBlocks[+i]; });
   return s;
 }
 
@@ -1306,7 +1315,7 @@ function CalendarPanel({ pin }) {
   const [events, setEvents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [view, setView] = useState('upcoming'); // upcoming | today | week
+  const [view, setView] = useState('chat'); // upcoming | today | week
 
   useEffect(() => {
     setLoading(true);
@@ -2900,6 +2909,28 @@ function App() {
             </div>
           ))}
         </div>
+        <nav className="sidebar-nav">
+          {[
+            {id:'chat',     icon:'💬', label:'Chat'},
+            {id:'home',     icon:'🏠', label:'Home'},
+            {id:'sport',    icon:'🏈', label:'Sport'},
+            {id:'kbt',      icon:'🎯', label:'KBT Trivia'},
+            {id:'pe',       icon:'🏫', label:'School PE'},
+            {id:'calendar', icon:'📅', label:'Calendar'},
+            {id:'sites',    icon:'🌐', label:'Sites'},
+            {id:'tips',     icon:'🏉', label:'Footy Tips'},
+            {id:'history',  icon:'📖', label:'History'},
+            {id:'racing',   icon:'🏇', label:'Racing'},
+            {id:'nrl',      icon:'🏉', label:'NRL'},
+            {id:'scoreboard',icon:'📺',label:'Scoreboard'},
+            {id:'xc',       icon:'🏃', label:'Cross Country'},
+          ].map(({id, icon, label}) => (
+            <button key={id} className={'sidebar-nav-btn' + (view===id?' active':'')}
+              onClick={() => { setView(id); setSidebarOpen(false); }}>
+              <span className="nav-icon">{icon}</span>{label}
+            </button>
+          ))}
+        </nav>
         <div className="sidebar-footer">
           <span className="user-pill">{user?.email || user?.name || 'User'}</span>
           <button className="icon-btn" onClick={() => setShowSettings(true)}>⚙️</button>
@@ -2912,26 +2943,11 @@ function App() {
         {wsState === 'connecting' && <div className="conn-banner">⚡ Connecting to Falkor…</div>}
         {wsState === 'disconnected' && <div className="conn-banner" style={{background:'rgba(239,68,68,.1)',color:'var(--danger)',borderColor:'rgba(239,68,68,.2)'}}>⚠️ Disconnected — reconnecting…</div>}
 
-        <div className="topbar"><button id="install-btn" onClick={()=>installApp()} title="Install Falkor" style={{display:'none',alignItems:'center',gap:'6px',background:'#d97757',color:'#fff',border:'none',borderRadius:'8px',padding:'6px 12px',fontSize:'13px',fontWeight:600,cursor:'pointer'}}><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 110 20A10 10 0 0112 2zm0 5v6m0 0l-3-3m3 3l3-3M7 17h10"/></svg>Install</button>
-          <button className="icon-btn" onClick={() => setSidebarOpen(true)}>☰</button>
+        <div className="topbar">
+          <button className="icon-btn hamburger-btn" onClick={() => setSidebarOpen(true)}>☰</button>
           <span className="topbar-title">{activeConvo?.title || 'Falkor'}</span>
 
-          {/* Nav */}
-          <div className="nav-sep"/>
-          <button className={'nav-btn'+(view==='home'?' active':'')} onClick={() => setView('home')}>🏠</button>
-          <button className={'nav-btn'+(view==='chat'?' active':'')} onClick={() => setView('chat')}>💬 Chat</button>
-          <button className={'nav-btn'+(view==='sport'?' active':'')} onClick={() => setView('sport')}>🏈</button>
-          <button className={'nav-btn'+(view==='calendar'?' active':'')} onClick={() => setView('calendar')}>📅</button>
-          <button className={'nav-btn'+(view==='sites'?' active':'')} onClick={() => setView('sites')}>🌐</button>
-          <button className={'nav-btn'+(view==='tips'?' active':'')} onClick={() => setView('tips')}>🏉</button>
-          <button className={'nav-btn'+(view==='history'?' active':'')} onClick={() => setView('history')}>📖</button>
-            <button className={'nav-btn'+(view==='racing'?' active':'')} onClick={() => setView('racing')}>Racing</button>
-          <button className={'nav-btn'+(view==='nrl'?' active':'')} onClick={() => setView('nrl')}>NRL</button>
-          <button className={'nav-btn'+(view==='kbt'?' active':'')} onClick={() => setView('kbt')}>🎯</button>
-          <button className={'nav-btn'+(view==='pe'?' active':'')} onClick={() => setView('pe')}>🏫</button>
-          <button className={'nav-btn'+(view==='scoreboard'?' active':'')} onClick={() => setView('scoreboard')}>📺</button>
-          <button className={'nav-btn'+(view==='xc'?' active':'')} onClick={() => setView('xc')}>🏃</button>
-          <div className="nav-sep"/>
+          <div style={{flex:1}}/>
 
           <select className="model-select" value={model} onChange={e => { setModelS(e.target.value); LS.setModel(e.target.value); }}>
             {MODELS.map(m => <option key={m.key} value={m.key}>{m.label}</option>)}
