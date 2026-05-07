@@ -2530,9 +2530,17 @@ function App() {
   }, [drivingMode]);
 
   // ── WebSocket ──
-  const connectWS = useCallback(() => {
+  const connectWS = useCallback(async () => {
     if (!user || (!LS.pin() && !LS.agentPin())) return;
     if (wsRef.current && wsRef.current.readyState < 2) return;
+    try {
+      const vr = await fetch(USERS_URL + '/user/verify', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: LS.userId(), pin: LS.pin() })
+      });
+      const vd = await vr.json();
+      if (vd.agentPin) LS.setAgentPin(vd.agentPin);
+    } catch {}
     setWsState('connecting');
     const ws = new WebSocket(AGENT_URL.replace('https://','wss://') + '/?pin=' + (LS.agentPin() || LS.pin()));
     wsRef.current = ws;
