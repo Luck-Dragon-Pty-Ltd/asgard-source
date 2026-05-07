@@ -463,7 +463,7 @@ function renderMD(text) {
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(codeBlockRe, function(_, lang, code) {
       var idx = _codeBlocks.length;
-      _codeBlocks.push('<pre><button class="copy-code-btn" onclick="window.copyCode(this)">Copy</button><code class="lang-'+(lang||'')'+">' + code.trim() + '</code></pre>');
+      _codeBlocks.push('<pre><button class="copy-code-btn" onclick="window.copyCode(this)">Copy</button><code class="lang-'+(lang||'')+'">' + code.trim() + '</code></pre>');
       return '\x01CB' + idx + '\x01';
     })
     .replace(inlineCodeRe, '<code>$1</code>')
@@ -475,7 +475,7 @@ function renderMD(text) {
     .replace(/^# (.+)$/gm, '<strong style="font-size:1.2em;display:block;margin:10px 0 4px">$1</strong>')
     .replace(/^[-*] (.+)$/gm, '<div style="padding-left:14px;margin:1px 0">• $1</div>')
     .replace(/^(\d+)\. (.+)$/gm, '<div style="padding-left:14px;margin:1px 0">$1. $2</div>')
-    .replace(/\n/g, '<br>');
+    .replace(/\n/g, '<br>')
     .replace(/\x01CB(\d+)\x01/g, function(_, i) { return _codeBlocks[+i]; });
   return s;
 }
