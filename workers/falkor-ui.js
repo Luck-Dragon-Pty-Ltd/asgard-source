@@ -2448,11 +2448,11 @@ function ProjectsPanel({ pin }) {
         setLoading(true);
         const url = 'https://asgard-tools.pgallivan.workers.dev/admin/projects';
         const res = await fetch(url);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);        if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
         // Map workers to projects
         const proj = data.workers || [];
-        setProjects(proj.slice(0, 50)); // Limit to 50
+        setProjects(proj.slice(0, 50)); // Limit to 50h
       } catch(e) {
         setError(e.message);
         console.error('Failed to load projects:', e);
@@ -3196,3 +3196,5 @@ async function togglePush() {
   try {
     const sub = await swRegistration.pushManager.subscribe({ userVisibleOnly:true, applicationServerKey:urlB64ToUint8(VAPID_PUB) });
     const p256dh = btoa(String.fromCharCode(...new Uint8Array(sub.getKey('p256dh')))).replace(/\+/g,'-').replace(
+
+};
