@@ -49,7 +49,7 @@ jobs:
       - name: Smoke test
         run: |
           sleep 4
-          RESULT=$(curl -s "https://asgard-tools.pgallivan.workers.dev/admin/smoke")
+          RESULT=$(curl -s "https://falkor-code.pgallivan.workers.dev/smoke")
           echo "$RESULT"
           OK=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok'))")
           if [ "$OK" != "True" ]; then
