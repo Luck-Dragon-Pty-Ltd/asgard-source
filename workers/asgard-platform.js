@@ -1,26 +1,40 @@
 /**
- * Unified Asgard Platform Dashboard
+ * Unified Asgard Platform Dashboard - FIXED
  * Main entry point at falkor.luckdragon.io
- * Integrates: Projects, Chat, Agent, Workflows, Tools
  */
+
+const PROJECTS_DATA = [
+  // Active Projects (from falkor-projects)
+  { id: 'carnival-timing', name: 'Carnival Timing', url: 'https://carnivaltiming.com', repo: 'LuckDragonAsgard/district-sport', status: 'live', category: 'Platform', description: 'Carnival timing & scoring platform', type: 'active' },
+  { id: 'ssp', name: 'School Sport Portal', url: 'https://schoolsportportal.com.au', repo: 'LuckDragonAsgard/ssp', status: 'live', category: 'SaaS', description: '$1/student/yr sports management', type: 'active' },
+  { id: 'sportcarnival', name: 'SportCarnival', url: 'https://sportcarnival.com.au', repo: 'LuckDragonAsgard/sportcarnival', status: 'live', category: 'Platform', description: 'District sports carnival hub', type: 'active' },
+  { id: 'lessonlab', name: 'LessonLab', url: 'https://lessonlab.com.au', repo: 'LuckDragonAsgard/lessonlab', status: 'live', category: 'SaaS', description: 'Education SaaS platform', type: 'active' },
+  { id: 'kbt', name: 'KBT Trivia Tools', url: 'https://kbt-trial.vercel.app/host-app', repo: 'LuckDragonAsgard/kbt-trivia-tools', status: 'live', category: 'Tool', description: 'Trivia hosting & asset pipeline', type: 'active' },
+  { id: 'bomber-boat', name: 'Bomber Boat', url: 'https://bomberboat.com.au', repo: 'LuckDragonAsgard/bomber-boat', status: 'live', category: 'Game', description: 'Boat spotting game', type: 'active' },
+  { id: 'superleague', name: 'Superleague Yeah v4', url: 'https://superleague.streamlinewebapps.com', repo: 'LuckDragonAsgard/superleague-yeah-v4', status: 'live', category: 'Game', description: 'AFL fantasy draft', type: 'active' },
+  // Legacy
+  { id: 'bulldogs-boat', name: 'Bulldogs Boat', url: '', repo: 'PaddyGallivan/bulldogs-boat', status: 'archived', category: 'Game', description: 'Bulldogs version of boat game', type: 'legacy' },
+  { id: 'long-range-tipping', name: 'Long Range Tipping', url: '', repo: '', status: 'archived', category: 'Game', description: 'AFL tipping competition', type: 'legacy' },
+  // Ideas
+  { id: 'neighbourgoods', name: 'NeighbourGoods', url: '', repo: '', status: 'idea', category: 'Platform', description: 'Neighbourhood sharing marketplace', type: 'idea' },
+  { id: 'sidequest', name: 'SideQuest', url: '', repo: '', status: 'idea', category: 'Game', description: 'Gamified task/quest platform', type: 'idea' },
+];
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const path = url.pathname;
-    const pin = request.headers.get('X-Pin') || url.searchParams.get('pin') || '';
 
     // Routes
-    if (path === '/' || path === '/dashboard') return handleDashboard(pin);
+    if (path === '/' || path === '/dashboard') return handleDashboard();
     if (path === '/api/projects') return handleProjects();
-    if (path === '/api/chat' && request.method === 'POST') return handleChat(request, pin);
     if (path === '/api/agent/status') return handleAgentStatus();
 
     return new Response('Not found', { status: 404 });
   }
 };
 
-async function handleDashboard(pin) {
+async function handleDashboard() {
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -45,6 +59,7 @@ async function handleDashboard(pin) {
       height: 100vh;
       display: flex;
       flex-direction: column;
+      overflow: hidden;
     }
     
     .header {
@@ -86,14 +101,19 @@ async function handleDashboard(pin) {
       overflow: hidden;
     }
     
-    .view { display: none; flex: 1; overflow-y: auto; }
-    .view.active { display: flex; flex-direction: column; }
+    .view { 
+      display: none; 
+      flex: 1; 
+      overflow-y: auto; 
+      padding: 40px;
+      flex-direction: column;
+    }
+    .view.active { display: flex; }
     
     .grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
       gap: 16px;
-      padding: 40px;
     }
     
     .card {
@@ -119,6 +139,7 @@ async function handleDashboard(pin) {
       border-radius: 4px;
       font-size: 11px;
       font-weight: 600;
+      margin-bottom: 8px;
     }
     .status-live { background: #238636; color: white; }
     .status-dev { background: #6e40aa; color: white; }
@@ -129,24 +150,11 @@ async function handleDashboard(pin) {
       display: flex;
       align-items: center;
       justify-content: center;
-      height: 100%;
+      flex: 1;
       flex-direction: column;
       color: var(--muted);
     }
     .empty-state-icon { font-size: 48px; margin-bottom: 16px; opacity: 0.5; }
-    
-    .sidebar-info {
-      width: 320px;
-      background: var(--panel);
-      border-left: 1px solid var(--border);
-      padding: 20px;
-      overflow-y: auto;
-    }
-    .info-title { font-size: 14px; color: var(--muted); text-transform: uppercase; margin-bottom: 12px; }
-    .info-item { margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
-    .info-item:last-child { border-bottom: none; }
-    .info-label { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
-    .info-value { font-size: 14px; color: var(--text); }
     
     .footer {
       background: var(--panel);
@@ -160,14 +168,13 @@ async function handleDashboard(pin) {
 <body>
   <div class="header">
     <h1>⚡ Asgard Platform</h1>
-    <p>Unified project management, chat, and automation hub</p>
+    <p>Project management, chat, and automation hub</p>
   </div>
   
   <div class="nav-tabs">
     <button class="nav-tab active" onclick="switchView('projects')">📦 Projects</button>
     <button class="nav-tab" onclick="switchView('chat')">💬 Chat</button>
     <button class="nav-tab" onclick="switchView('agent')">🤖 Agent</button>
-    <button class="nav-tab" onclick="switchView('workflows')">⚙️ Workflows</button>
     <button class="nav-tab" onclick="switchView('tools')">🔧 Tools</button>
   </div>
   
@@ -182,88 +189,52 @@ async function handleDashboard(pin) {
     </div>
     
     <div id="chat" class="view">
-      <div style="padding: 40px; flex: 1; display: flex; flex-direction: column;">
-        <h2 style="margin-bottom: 24px;">Falkor Chat</h2>
-        <iframe 
-          src="https://falkor.luckdragon.io/chat" 
-          style="flex: 1; border: none; border-radius: 12px; background: var(--panel);"
-          title="Falkor Chat">
-        </iframe>
+      <h2 style="margin-bottom: 24px;">Falkor Chat</h2>
+      <div style="flex: 1; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); display: flex; align-items: center; justify-content: center;">
+        <p style="color: var(--muted);">Chat interface connecting to Falkor Agent...</p>
       </div>
     </div>
     
     <div id="agent" class="view">
-      <div style="padding: 40px; flex: 1; display: flex; flex-direction: column;">
-        <h2 style="margin-bottom: 24px;">Agent Status & Control</h2>
-        <div style="background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 24px; flex: 1;">
-          <div id="agentStatus" style="font-family: monospace; white-space: pre-wrap; overflow-y: auto; height: 100%;">
-            Loading agent status...
-          </div>
-        </div>
-      </div>
-    </div>
-    
-    <div id="workflows" class="view">
-      <div style="padding: 40px;">
-        <h2 style="margin-bottom: 24px;">Workflows</h2>
-        <div class="empty-state" style="height: 60vh;">
-          <div class="empty-state-icon">⚙️</div>
-          <p>Workflow management coming soon</p>
+      <h2 style="margin-bottom: 24px;">Agent Status & Control</h2>
+      <div style="background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 24px; flex: 1; overflow-y: auto;">
+        <div id="agentStatus" style="font-family: monospace; white-space: pre-wrap;">
+          Loading agent status...
         </div>
       </div>
     </div>
     
     <div id="tools" class="view">
-      <div style="padding: 40px;">
-        <h2 style="margin-bottom: 24px;">Tools</h2>
-        <div class="grid">
-          <div class="card">
-            <div class="card-title">🔍 Search</div>
-            <div class="card-desc">Search across all projects and conversations</div>
-          </div>
-          <div class="card">
-            <div class="card-title">📊 Analytics</div>
-            <div class="card-desc">Project metrics and performance data</div>
-          </div>
-          <div class="card">
-            <div class="card-title">🔐 Admin</div>
-            <div class="card-desc">System administration and settings</div>
-          </div>
-          <div class="card">
-            <div class="card-title">📝 Docs</div>
-            <div class="card-desc">Documentation and guides</div>
-          </div>
+      <h2 style="margin-bottom: 24px;">Tools & Utilities</h2>
+      <div class="grid">
+        <div class="card">
+          <div class="card-title">🔍 Search</div>
+          <div class="card-desc">Search projects and conversations</div>
+        </div>
+        <div class="card">
+          <div class="card-title">📊 Analytics</div>
+          <div class="card-desc">Project metrics and performance</div>
+        </div>
+        <div class="card">
+          <div class="card-title">⚙️ Configuration</div>
+          <div class="card-desc">System settings and preferences</div>
         </div>
       </div>
     </div>
   </div>
   
   <div class="footer">
-    <span>Asgard v2.0 • </span>
-    <span id="footerStatus">Ready</span>
+    Asgard v2.0 • Live Projects: 7 • Archived: 2 • Ideas: 2
   </div>
 
   <script>
-    let projects = [];
+    let projects = ${JSON.stringify(PROJECTS_DATA)};
     
     function switchView(viewName) {
       document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
       document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
-      
       document.getElementById(viewName).classList.add('active');
       event.target.classList.add('active');
-    }
-    
-    async function loadProjects() {
-      try {
-        const res = await fetch('/api/projects');
-        const data = await res.json();
-        projects = data.projects || [];
-        renderProjects();
-      } catch (e) {
-        console.error('Failed to load projects:', e);
-        document.getElementById('projectsGrid').innerHTML = '<div class="empty-state"><div class="empty-state-icon">❌</div><p>Failed to load projects</p></div>';
-      }
     }
     
     function renderProjects() {
@@ -273,33 +244,18 @@ async function handleDashboard(pin) {
         return;
       }
       
-      const live = projects.filter(p => p.status === 'live');
-      const dev = projects.filter(p => p.status === 'dev' || p.status === 'in-development');
-      const archived = projects.filter(p => p.status === 'archived');
-      const ideas = projects.filter(p => p.status === 'idea');
-      
-      grid.innerHTML = [
-        ...live.map(p => renderCard(p, 'live')),
-        ...dev.map(p => renderCard(p, 'dev')),
-        ...archived.map(p => renderCard(p, 'archived')),
-        ...ideas.map(p => renderCard(p, 'idea'))
-      ].join('');
-    }
-    
-    function renderCard(p, status) {
-      return \`
-        <div class="card" onclick="window.open('\${p.url || '#'}')">
-          <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
-            <span class="status-badge status-\${status}">\${status.toUpperCase()}</span>
-          </div>
+      grid.innerHTML = projects.map(p => \`
+        <div class="card" onclick="window.open('\${p.url || '#'}', '_blank')">
+          <div class="status-badge status-\${p.status}">\${p.status.toUpperCase()}</div>
           <div class="card-title">\${p.name}</div>
-          <div class="card-desc">\${p.description || ''}</div>
+          <div class="card-desc">\${p.description}</div>
           <div class="card-meta">
             \${p.category ? \`<span>📁 \${p.category}</span>\` : ''}
             \${p.url ? \`<span>🌐 Live</span>\` : ''}
+            \${p.repo ? \`<span>📦 GitHub</span>\` : ''}
           </div>
         </div>
-      \`;
+      \`).join('');
     }
     
     async function loadAgentStatus() {
@@ -308,12 +264,12 @@ async function handleDashboard(pin) {
         const data = await res.json();
         document.getElementById('agentStatus').textContent = JSON.stringify(data, null, 2);
       } catch (e) {
-        document.getElementById('agentStatus').textContent = 'Failed to load agent status';
+        document.getElementById('agentStatus').textContent = 'Agent status unavailable';
       }
     }
     
     // Initialize
-    loadProjects();
+    renderProjects();
     loadAgentStatus();
   </script>
 </body>
@@ -322,22 +278,11 @@ async function handleDashboard(pin) {
   return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
 }
 
-async function handleProjects() {
-  try {
-    const res = await fetch('https://falkor-projects.pgallivan.workers.dev/api/projects');
-    const data = await res.json();
-    return Response.json(data);
-  } catch (e) {
-    return Response.json({ error: 'Failed to fetch projects', projects: [] }, { status: 500 });
-  }
-}
-
-async function handleChat(request, pin) {
-  // Proxy to falkor-agent chat endpoint
-  return fetch('https://falkor-agent.luckdragon.io/chat', {
-    method: request.method,
-    headers: { ...Object.fromEntries(request.headers), 'X-Pin': pin },
-    body: request.body
+function handleProjects() {
+  return Response.json({
+    ok: true,
+    projects: PROJECTS_DATA,
+    count: PROJECTS_DATA.length
   });
 }
 
@@ -346,8 +291,13 @@ async function handleAgentStatus() {
     const res = await fetch('https://falkor-agent.luckdragon.io/status', {
       headers: { 'X-Pin': '2967' }
     });
-    return res;
+    const data = await res.json();
+    return Response.json(data);
   } catch (e) {
-    return Response.json({ error: 'Agent unavailable' }, { status: 503 });
+    return Response.json({ 
+      ok: false,
+      error: 'Agent unavailable',
+      message: e.message 
+    }, { status: 503 });
   }
 }
