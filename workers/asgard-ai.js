@@ -1,5 +1,5 @@
 // asgard-ai v5.8.0-stream: multi-provider (Anthropic/OpenAI/Groq) streaming SSE, normalized tokens
-const VERSION = '6.5.0';
+const VERSION = '6.6.0';
 const WORKER_NAME = "asgard-ai";
 
 // --- PIN auth helper (v1.1.0 security patch) ---
@@ -2341,6 +2341,34 @@ const AGENTIC_TOOLS_OPENAI = [
       new_content: { type: "string", description: "The complete new content of the file" },
       mime_type:   { type: "string", description: "MIME type, e.g. text/markdown or text/plain (default text/plain)" }
     }, required: ["file_id","new_content"] }
+  }},
+  // New: create new Google Drive files (native Docs/Sheets/Slides/folders + plain)
+  { type: "function", function: {
+    name: "drive_create_file",
+    description: "Create a new Google Drive file. Use type='doc' for Google Doc, 'sheet' for Sheet, 'slides' for Slides, 'folder' for folder, 'text' for plain text. Returns id and webViewLink. Optional initial_text inserts content (Docs only) after creation.",
+    parameters: { type: "object", properties: {
+      name: { type: "string", description: "File or folder name" },
+      type: { type: "string", description: "doc | sheet | slides | folder | text", default: "doc" },
+      parent: { type: "string", description: "Drive folder ID. Defaults to ASGARD folder." },
+      initial_text: { type: "string", description: "Optional initial text to insert (Doc only)" }
+    }, required: ["name"] }
+  }},
+  { type: "function", function: {
+    name: "sheets_write_values",
+    description: "Write a 2D array of values to a range in an existing Google Sheet. Range example: 'Sheet1!A1' (top-left corner; will expand to fit values). Each row is an array of cells.",
+    parameters: { type: "object", properties: {
+      sheet_id: { type: "string", description: "Spreadsheet ID" },
+      range: { type: "string", description: "A1 notation, e.g. Sheet1!A1" },
+      values: { type: "array", description: "2D array of cell values: [[row1cell1,row1cell2],[row2cell1,row2cell2]]" }
+    }, required: ["sheet_id","range","values"] }
+  }},
+  { type: "function", function: {
+    name: "slides_batch_update",
+    description: "Apply a Slides API batchUpdate to an existing presentation. Pass the requests array directly. Useful for adding slides, replacing text, etc.",
+    parameters: { type: "object", properties: {
+      presentation_id: { type: "string", description: "Presentation ID" },
+      requests: { type: "array", description: "Slides batchUpdate requests array per Slides API spec" }
+    }, required: ["presentation_id","requests"] }
   }}
 ];
 
@@ -2996,6 +3024,66 @@ async function agenticExecuteTool(name, input, env) {
       if (!r.ok) return { error: "drive_patch " + r.status, detail: (await r.text()).slice(0,300) };
       const data = await r.json();
       return { ok: true, file_id, size: new_content.length, name: data.name, modifiedTime: data.modifiedTime };
+    }
+    if (name === "drive_create_file") {
+      const { name: fname, type = "doc", parent, initial_text } = input || {};
+      if (!fname) return { error: "name required" };
+      const MIMES = {
+        doc: "application/vnd.google-apps.document",
+        sheet: "application/vnd.google-apps.spreadsheet",
+        slides: "application/vnd.google-apps.presentation",
+        folder: "application/vnd.google-apps.folder",
+        text: "text/plain"
+      };
+      const mime = MIMES[type] || MIMES.doc;
+      const access = await _agentFullAccessToken(env);
+      const parentId = parent || ASGARD_DRIVE_FOLDER;
+      const meta = { name: fname, mimeType: mime, parents: [parentId] };
+      const r = await fetch("https://www.googleapis.com/drive/v3/files?supportsAllDrives=true&fields=id,name,mimeType,webViewLink", {
+        method: "POST",
+        headers: { "Authorization": "Bearer " + access, "Content-Type": "application/json" },
+        body: JSON.stringify(meta)
+      });
+      if (!r.ok) return { error: "drive_create_file " + r.status, detail: (await r.text()).slice(0,400) };
+      const data = await r.json();
+      // Optionally append initial text for Docs
+      if (type === "doc" && initial_text) {
+        try {
+          const req = { requests: [{ insertText: { location: { index: 1 }, text: initial_text } }] };
+          await fetch(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(data.id)}:batchUpdate`, {
+            method: "POST",
+            headers: { "Authorization": "Bearer " + access, "Content-Type": "application/json" },
+            body: JSON.stringify(req)
+          });
+        } catch(e) { /* swallow — file still created */ }
+      }
+      return { ok: true, ...data, type };
+    }
+    if (name === "sheets_write_values") {
+      const { sheet_id, range, values } = input || {};
+      if (!sheet_id || !range || !Array.isArray(values)) return { error: "sheet_id, range, values (2D array) required" };
+      const access = await _agentFullAccessToken(env);
+      const r = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(sheet_id)}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`, {
+        method: "PUT",
+        headers: { "Authorization": "Bearer " + access, "Content-Type": "application/json" },
+        body: JSON.stringify({ values })
+      });
+      if (!r.ok) return { error: "sheets_write_values " + r.status, detail: (await r.text()).slice(0,400) };
+      const data = await r.json();
+      return { ok: true, updated_cells: data.updatedCells || 0, updated_range: data.updatedRange };
+    }
+    if (name === "slides_batch_update") {
+      const { presentation_id, requests } = input || {};
+      if (!presentation_id || !Array.isArray(requests)) return { error: "presentation_id and requests (array) required" };
+      const access = await _agentFullAccessToken(env);
+      const r = await fetch(`https://slides.googleapis.com/v1/presentations/${encodeURIComponent(presentation_id)}:batchUpdate`, {
+        method: "POST",
+        headers: { "Authorization": "Bearer " + access, "Content-Type": "application/json" },
+        body: JSON.stringify({ requests })
+      });
+      if (!r.ok) return { error: "slides_batch_update " + r.status, detail: (await r.text()).slice(0,400) };
+      const data = await r.json();
+      return { ok: true, replies_count: (data.replies || []).length };
     }
     if (name === "read_messages") {
       const { group, limit = 20 } = input || {};
