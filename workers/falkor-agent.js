@@ -646,7 +646,7 @@ export class FalkorAgent {
       const memory = await this.getMemory();
       const ctxTs = await this.state.storage.get('liveContextTs');
       return corsJson({
-        version: '2.10.0',
+        version: '2.11.0',
         activeSessions: this.sessions.size,
         historyLength: history.length,
         memoryKeys: Object.keys(memory).length,
@@ -922,60 +922,15 @@ export class FalkorAgent {
     const msgId = 'msg_' + Date.now();
 
     if (ws) {
-      // ── Streaming path: SSE → WS tokens ──────────────────────────────────
+      // ── Agentic path: full response with tool use; broadcast tool events + final reply ──
       try {
-        const resp = await fetch(`${aiUrl}/chat/stream`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Pin': aiPin },
-          body: JSON.stringify({
-            messages: [...contextHistory, { role: 'user', content: text }],
-            system: systemPrompt,
-            model,
-            max_tokens: 2048,
-          }),
-        });
-        if (resp.ok) {
-          const reader = resp.body.getReader();
-          const decoder = new TextDecoder();
-          let buf = '';
-          let accumulated = '';
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buf += decoder.decode(value, { stream: true });
-            const lines = buf.split('\n');
-            buf = lines.pop();
-            for (const line of lines) {
-              const trimmed = line.trim();
-              if (!trimmed.startsWith('data:')) continue;
-              const raw = trimmed.slice(5).trim();
-              try {
-                const parsed = JSON.parse(raw);
-                if (parsed.t) {
-                  accumulated += parsed.t;
-                  // Broadcast token to all connected WS sessions
-                  this.broadcast({ type: 'token', msgId, text: accumulated });
-                }
-              } catch {}
-            }
-          }
-          reply = accumulated;
-        } else {
-          const errBody = await resp.text().catch(() => '');
-          reply = '[AI error: ' + resp.status + (errBody ? ': ' + errBody.slice(0, 80) : '') + ']';
-        }
-      } catch (err) {
-        reply = '[Stream error: ' + err.message + ']';
-      }
-    } else {
-      // ── Non-streaming path (REST /chat endpoint, widget, etc.) ───────────
-      try {
-        const resp = await fetch(`${aiUrl}/chat/smart`, {
+        this.broadcast({ type: 'token', msgId, text: '…' });
+        const resp = await fetch(`${aiUrl}/chat/agentic`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Pin': aiPin },
           body: JSON.stringify({
             message: text,
-            context: contextHistory,
+            messages: contextHistory,
             system: systemPrompt,
             model,
             max_tokens: 2048,
@@ -983,7 +938,37 @@ export class FalkorAgent {
         });
         if (resp.ok) {
           const data = await resp.json();
-          reply = data.reply || data.content || '';
+          reply = data.reply || data.content || data.response || data.text || '';
+          if (Array.isArray(data.tools_executed) && data.tools_executed.length > 0) {
+            for (const t of data.tools_executed) {
+              this.broadcast({ type: 'tool', msgId, tool: typeof t === 'string' ? t : (t.tool || t.name || JSON.stringify(t)) });
+            }
+          }
+          this.broadcast({ type: 'token', msgId, text: reply });
+        } else {
+          const errBody = await resp.text().catch(() => '');
+          reply = '[AI error: ' + resp.status + (errBody ? ': ' + errBody.slice(0, 100) : '') + ']';
+        }
+      } catch (err) {
+        reply = '[Agentic error: ' + err.message + ']';
+      }
+    } else {
+      // ── Non-streaming path — also agentic ─────────────────────────────────
+      try {
+        const resp = await fetch(`${aiUrl}/chat/agentic`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Pin': aiPin },
+          body: JSON.stringify({
+            message: text,
+            messages: contextHistory,
+            system: systemPrompt,
+            model,
+            max_tokens: 2048,
+          }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          reply = data.reply || data.content || data.response || data.text || '';
         } else {
           const errBody = await resp.text().catch(() => '');
           reply = '[AI error: ' + resp.status + (errBody ? ': ' + errBody.slice(0, 100) : '') + ']';
@@ -1053,7 +1038,9 @@ export default {
 
     if (url.pathname !== '/health') {
       const pin = request.headers.get('X-Pin') || url.searchParams.get('pin');
-      if (!pin || !env.AGENT_PIN || pin !== env.AGENT_PIN) {
+      // Accept any of: AGENT_PIN, AI_WORKER_PIN, master vault pin (535554), Paddy pin (2967)
+      const VALID_PINS = [env.AGENT_PIN, env.AI_WORKER_PIN, '535554', '2967'].filter(Boolean);
+      if (!pin || !VALID_PINS.includes(pin)) {
         return new Response(JSON.stringify({ error: 'Unauthorized' }), {
           status: 401, headers: { 'Content-Type': 'application/json', ...CORS_HEADERS },
         });
@@ -1061,7 +1048,7 @@ export default {
     }
 
     if (url.pathname === '/health') {
-      return Response.json({ status: 'ok', version: '2.10.0', worker: 'falkor-agent' });
+      return Response.json({ status: 'ok', version: '2.11.0', worker: 'falkor-agent' });
     }
 
     // ── /tasks proxy → falkor-workflows via service binding (no 522 loopback) ──
