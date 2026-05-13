@@ -605,12 +605,19 @@ async function handleMemorySave(request, env, pinUser) {
   if (!env.DB) return json({ ok: false, error: 'D1 not bound' }, 500);
   await _ensureMemoryTables(env);
   const body = await request.json().catch(() => ({}));
-  const { key, value, project = 'global', shared = false } = body;
+  const { key, value, project, shared = false } = body;
   if (!key || value === undefined) return json({ ok: false, error: 'key and value required' }, 400);
+  if (!project) return json({ ok: false, error: 'project is REQUIRED — no default. Pick a slug from project_hub (e.g. kbt, asgard-final-build, wps-curriculum). Cross-project writes were causing data loss; this is now enforced at the HTTP layer too.' }, 400);
   const now = Date.now();
+  // VERSIONED write to memory_v2 — append-only, full history preserved, audit_log fires automatically
+  const prev = await env.DB.prepare("SELECT MAX(version) AS v FROM memory_v2 WHERE pin_user=? AND project=? AND key=?").bind(pinUser, project, String(key)).first();
+  const nextVersion = (prev && prev.v ? prev.v : 0) + 1;
+  await env.DB.prepare("INSERT INTO memory_v2 (pin_user, project, key, value, version, is_current, is_shared, actor, created_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)")
+    .bind(pinUser, project, String(key), String(value), nextVersion, shared ? 1 : 0, 'http:/memory/save', now).run();
+  // Legacy mirror so existing reads keep working
   await env.DB.prepare("INSERT INTO memory (pin_user, project, key, value, is_shared, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(pin_user, project, key) DO UPDATE SET value=excluded.value, is_shared=excluded.is_shared, updated_at=excluded.updated_at")
     .bind(pinUser, project, String(key), String(value), shared ? 1 : 0, now).run();
-  return json({ ok: true, key, project, shared, pin_user: pinUser });
+  return json({ ok: true, key, project, version: nextVersion, shared, pin_user: pinUser });
 }
 
 async function handleMemoryList(request, env, pinUser) {
@@ -634,14 +641,10 @@ async function handleMemoryForget(request, env, pinUser) {
   const body = await request.json().catch(() => ({}));
   const { key, project } = body;
   if (!key) return json({ ok: false, error: 'key required' }, 400);
-  if (project) {
-    await env.DB.prepare("DELETE FROM memory WHERE pin_user = ? AND key = ? AND project = ?").bind(pinUser, key, project).run();
-    await env.DB.prepare("UPDATE memory_v2 SET is_current = 0, superseded_at = ? WHERE pin_user = ? AND project = ? AND key = ? AND is_current = 1").bind(Date.now(), pinUser, project, key).run();
-  } else {
-    // Cross-project delete blocked — was destroying data across projects
-    return { error: 'project required for forget_memory — cross-project forget is no longer allowed' };
-  }
-  return json({ ok: true, deleted: key });
+  if (!project) return json({ ok: false, error: 'project required for forget_memory — cross-project forget is no longer allowed (was destroying data across projects)' }, 400);
+  await env.DB.prepare("DELETE FROM memory WHERE pin_user = ? AND key = ? AND project = ?").bind(pinUser, key, project).run();
+  await env.DB.prepare("UPDATE memory_v2 SET is_current = 0, superseded_at = ? WHERE pin_user = ? AND project = ? AND key = ? AND is_current = 1").bind(Date.now(), pinUser, project, key).run();
+  return json({ ok: true, soft_deleted: key, project });
 }
 
 // ─── MESSAGING SYSTEM ────────────────────────────────────────────────────────
