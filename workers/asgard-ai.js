@@ -1,3 +1,6 @@
+--05f3aa70c5095b0e73b7f27e69e0804768a7a5c7e533ce6958cf63dd910e
+Content-Disposition: form-data; name="index.js"
+
 // asgard-ai v5.8.0-stream: multi-provider (Anthropic/OpenAI/Groq) streaming SSE, normalized tokens
 const VERSION = '6.5.0';
 const WORKER_NAME = "asgard-ai";
@@ -605,19 +608,12 @@ async function handleMemorySave(request, env, pinUser) {
   if (!env.DB) return json({ ok: false, error: 'D1 not bound' }, 500);
   await _ensureMemoryTables(env);
   const body = await request.json().catch(() => ({}));
-  const { key, value, project, shared = false } = body;
+  const { key, value, project = 'global', shared = false } = body;
   if (!key || value === undefined) return json({ ok: false, error: 'key and value required' }, 400);
-  if (!project) return json({ ok: false, error: 'project is REQUIRED — no default. Pick a slug from project_hub (e.g. kbt, asgard-final-build, wps-curriculum). Cross-project writes were causing data loss; this is now enforced at the HTTP layer too.' }, 400);
   const now = Date.now();
-  // VERSIONED write to memory_v2 — append-only, full history preserved, audit_log fires automatically
-  const prev = await env.DB.prepare("SELECT MAX(version) AS v FROM memory_v2 WHERE pin_user=? AND project=? AND key=?").bind(pinUser, project, String(key)).first();
-  const nextVersion = (prev && prev.v ? prev.v : 0) + 1;
-  await env.DB.prepare("INSERT INTO memory_v2 (pin_user, project, key, value, version, is_current, is_shared, actor, created_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)")
-    .bind(pinUser, project, String(key), String(value), nextVersion, shared ? 1 : 0, 'http:/memory/save', now).run();
-  // Legacy mirror so existing reads keep working
   await env.DB.prepare("INSERT INTO memory (pin_user, project, key, value, is_shared, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(pin_user, project, key) DO UPDATE SET value=excluded.value, is_shared=excluded.is_shared, updated_at=excluded.updated_at")
     .bind(pinUser, project, String(key), String(value), shared ? 1 : 0, now).run();
-  return json({ ok: true, key, project, version: nextVersion, shared, pin_user: pinUser });
+  return json({ ok: true, key, project, shared, pin_user: pinUser });
 }
 
 async function handleMemoryList(request, env, pinUser) {
@@ -641,10 +637,12 @@ async function handleMemoryForget(request, env, pinUser) {
   const body = await request.json().catch(() => ({}));
   const { key, project } = body;
   if (!key) return json({ ok: false, error: 'key required' }, 400);
-  if (!project) return json({ ok: false, error: 'project required for forget_memory — cross-project forget is no longer allowed (was destroying data across projects)' }, 400);
-  await env.DB.prepare("DELETE FROM memory WHERE pin_user = ? AND key = ? AND project = ?").bind(pinUser, key, project).run();
-  await env.DB.prepare("UPDATE memory_v2 SET is_current = 0, superseded_at = ? WHERE pin_user = ? AND project = ? AND key = ? AND is_current = 1").bind(Date.now(), pinUser, project, key).run();
-  return json({ ok: true, soft_deleted: key, project });
+  if (project) {
+    await env.DB.prepare("DELETE FROM memory WHERE pin_user = ? AND key = ? AND project = ?").bind(pinUser, key, project).run();
+  } else {
+    await env.DB.prepare("DELETE FROM memory WHERE pin_user = ? AND key = ?").bind(pinUser, key).run();
+  }
+  return json({ ok: true, deleted: key });
 }
 
 // ─── MESSAGING SYSTEM ────────────────────────────────────────────────────────
@@ -1079,92 +1077,6 @@ async function handleImageGenerate(request, env) {
       prompt_tokens: 0, completion_tokens: 0, cost_usd: _cost, uid, sid });
   } catch (e) { console.error("spend log (image):", e && (e.message || String(e))); }
   return json({ ok: true, url: imageUrl, revised_prompt: image && image.revised_prompt, model });
-}
-
-// ---------- Image generate-and-store (DALL-E 3 / gpt-image-1 → Supabase permanent URL) ----------
-async function handleImageGenerateAndStore(request, env) {
-  const body = await request.json().catch(() => ({}));
-  const prompt = (body.prompt || '').toString();
-  const folder = (body.folder || 'general').replace(/[^a-z0-9_-]/gi, '-');
-  const size = body.size || '1024x1024';
-  const model = body.model || 'dall-e-3';
-  const style = body.style || 'vivid';
-  const quality = body.quality || (model === 'gpt-image-1' ? 'medium' : 'standard');
-  const uid = body.uid || 'paddy';
-  const filename = body.filename || (Date.now() + '-' + Math.random().toString(36).slice(2,8) + '.png');
-
-  if (!prompt) return err('prompt required', 400);
-  if (!env.OPENAI_API_KEY) return err('OPENAI_API_KEY missing', 500);
-  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_KEY) return err('Supabase not configured', 500);
-
-  // Step 1: Generate image (always request b64_json for storage)
-  // gpt-image-1 doesn't support response_format (always b64_json)
-  // dall-e-3 needs response_format: 'b64_json' explicitly
-  const reqBody = { model, prompt, size, quality, n: 1 };
-  if (model === 'dall-e-3') {
-    reqBody.style = style;
-    reqBody.response_format = 'b64_json';
-  }
-  const genRes = await fetch('https://api.openai.com/v1/images/generations', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + env.OPENAI_API_KEY },
-    body: JSON.stringify(reqBody),
-  });
-  if (!genRes.ok) { const t = await genRes.text(); return err('image-gen ' + genRes.status + ': ' + t.slice(0,300), 502); }
-  const genData = await genRes.json();
-  const image = genData.data && genData.data[0];
-  if (!image) return err('no image data returned', 502);
-  // gpt-image-1 always returns b64_json; dall-e-3 returns b64_json when requested
-  const b64 = image.b64_json || (image.url ? null : null);
-  if (!image.b64_json && !image.url) return err('no image data in response', 502);
-
-  // Step 2: Upload to Supabase generated-images bucket
-  const path = folder + '/' + filename;
-  // Get bytes: from b64_json directly, or fetch from temporary URL
-  let bytes;
-  if (image.b64_json) {
-    const binary = atob(image.b64_json);
-    bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  } else {
-    // dall-e-3 without response_format returns a temporary URL — fetch and store
-    const imgRes = await fetch(image.url);
-    if (!imgRes.ok) return err('failed to fetch generated image URL', 502);
-    bytes = new Uint8Array(await imgRes.arrayBuffer());
-  }
-
-  const uploadRes = await fetch(env.SUPABASE_URL + '/storage/v1/object/generated-images/' + path, {
-    method: 'POST',
-    headers: {
-      'Authorization': 'Bearer ' + env.SUPABASE_SERVICE_KEY,
-      'Content-Type': 'image/png',
-      'x-upsert': 'true',
-    },
-    body: bytes,
-  });
-  if (!uploadRes.ok) {
-    const t = await uploadRes.text();
-    return err('supabase-upload ' + uploadRes.status + ': ' + t.slice(0,200), 502);
-  }
-
-  // Step 3: Build permanent public URL
-  const publicUrl = env.SUPABASE_URL + '/storage/v1/object/public/generated-images/' + path;
-
-  // Log spend
-  try {
-    const _cost = SPEND_PER_IMAGE[model] || 0.040;
-    await bgLog(env, { provider: 'openai', model, endpoint: 'image-store',
-      prompt_tokens: 0, completion_tokens: 0, cost_usd: _cost, uid, sid: null });
-  } catch(e) {}
-
-  return json({
-    ok: true,
-    url: publicUrl,
-    path,
-    model,
-    revised_prompt: image.revised_prompt,
-    folder,
-  });
 }
 
 // ---------- NEW: TTS via ElevenLabs ----------
@@ -2270,18 +2182,18 @@ const AGENTIC_TOOLS_OPENAI = [
       webhook_url: { type: "string", description: "Full Power Automate HTTP webhook URL (from the flow's trigger config)" },
       payload: { type: "object", description: "JSON payload to send to the flow", additionalProperties: true }
     }, required: ["webhook_url"] } } },
-  { type: "function", function: { name: "save_memory", description: "Save a versioned memory fact. project is REQUIRED — choose a project slug (e.g. 'kbt','asgard-final-build','wps-curriculum'). Every save creates a new VERSION; old versions preserved in memory_v2 and queryable. Audit log fires automatically. shared=true = all users see it.",
+  { type: "function", function: { name: "save_memory", description: "Save a memory fact for future chats. shared=true = all users (Paddy/Jacky/George) see it; shared=false = only you. project = which project this belongs to (e.g. 'kbt','asgard','global').",
     parameters: { type: "object", properties: {
-      key: { type: "string", description: "Short project-prefixed label, e.g. 'kbt_prod_url' or 'asgard_deploy_warning'. NEVER use generic keys like 'state'/'current'/'latest' — they collide across projects." },
+      key: { type: "string", description: "Short label, e.g. 'kbt_prod_url' or 'deploy_warning'" },
       value: { type: "string", description: "The fact to remember" },
-      project: { type: "string", description: "REQUIRED. Project slug from project_hub. No default. No 'global' fallback." },
+      project: { type: "string", description: "Project name or 'global'" },
       shared: { type: "boolean", description: "true = visible to all users" }
-    }, required: ["key", "value", "project"] } } },
-  { type: "function", function: { name: "forget_memory", description: "Soft-delete a memory fact (flips is_current=0 in memory_v2, history preserved). project is REQUIRED — cross-project deletes are blocked.",
+    }, required: ["key", "value"] } } },
+  { type: "function", function: { name: "forget_memory", description: "Delete a remembered fact by key.",
     parameters: { type: "object", properties: {
       key: { type: "string" },
-      project: { type: "string", description: "REQUIRED. Project slug — no default, no cross-project delete." }
-    }, required: ["key", "project"] } } },
+      project: { type: "string" }
+    }, required: ["key"] } } },
   { type: "function", function: { name: "send_message", description: "Send a message to a team group (Paddy, Jacky, George). Auto-creates the group if it doesn't exist. Use names like 'all', 'paddy-jacky', 'kbt-team'.",
     parameters: { type: "object", properties: {
       group: { type: "string", description: "Group name or ID" },
@@ -2871,35 +2783,27 @@ async function agenticExecuteTool(name, input, env) {
       return { ok: true, count: (j.files||[]).length, folders: j.files || [] };
     }
     if (name === "save_memory") {
-      const { key, value, project, shared = false } = input || {};
+      const { key, value, project = 'global', shared = false } = input || {};
       if (!key || value === undefined) return { error: 'key and value required' };
-      if (!project) return { error: 'project is REQUIRED — no default. Pick a slug from project_hub (e.g. kbt, asgard-final-build, wps-curriculum). Cross-project writes were causing data loss; this is now enforced.' };
       if (!env.DB) return { error: 'D1 not bound' };
       await _ensureMemoryTables(env);
       const pinUser = env._pinUser || 'shared';
       const now = Date.now();
-      // VERSIONED write to memory_v2 — append-only, full history preserved, audit_log fires automatically
-      const prev = await env.DB.prepare("SELECT MAX(version) AS v FROM memory_v2 WHERE pin_user=? AND project=? AND key=?").bind(pinUser, project, String(key)).first();
-      const nextVersion = (prev && prev.v ? prev.v : 0) + 1;
-      await env.DB.prepare("INSERT INTO memory_v2 (pin_user, project, key, value, version, is_current, is_shared, actor, created_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)")
-        .bind(pinUser, project, String(key), String(value), nextVersion, shared ? 1 : 0, 'asgard-ai', now).run();
-      // Legacy mirror to memory — destructive, but harmless because memory_v2 preserves history
       await env.DB.prepare("INSERT INTO memory (pin_user, project, key, value, is_shared, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(pin_user, project, key) DO UPDATE SET value=excluded.value, is_shared=excluded.is_shared, updated_at=excluded.updated_at")
         .bind(pinUser, project, String(key), String(value), shared ? 1 : 0, now).run();
-      return { ok: true, saved: key, project, version: nextVersion, shared, user: pinUser };
+      return { ok: true, saved: key, project, shared, user: pinUser };
     }
     if (name === "forget_memory") {
       const { key, project } = input || {};
       if (!key) return { error: 'key required' };
-      if (!project) return { error: 'project is REQUIRED — cross-project forget is not allowed. The previous behavior deleted the key from EVERY project at once and caused data loss.' };
       if (!env.DB) return { error: 'D1 not bound' };
       const pinUser = env._pinUser || 'shared';
-      const now = Date.now();
-      // SOFT delete in memory_v2 (preserves history via is_current=0)
-      await env.DB.prepare("UPDATE memory_v2 SET is_current = 0, superseded_at = ? WHERE pin_user = ? AND project = ? AND key = ? AND is_current = 1").bind(now, pinUser, project, key).run();
-      // Hard delete in legacy memory (scoped to project)
-      await env.DB.prepare("DELETE FROM memory WHERE pin_user = ? AND key = ? AND project = ?").bind(pinUser, key, project).run();
-      return { ok: true, soft_deleted: key, project };
+      if (project) {
+        await env.DB.prepare("DELETE FROM memory WHERE pin_user = ? AND key = ? AND project = ?").bind(pinUser, key, project).run();
+      } else {
+        await env.DB.prepare("DELETE FROM memory WHERE pin_user = ? AND key = ?").bind(pinUser, key).run();
+      }
+      return { ok: true, deleted: key };
     }
     if (name === "send_message") {
       const { group, message } = input || {};
@@ -3960,7 +3864,7 @@ export default {
       if (path === "/health") {
         return json({
           ok: true, worker: WORKER_NAME, version: VERSION,
-          routes: ["/health","/chat/smart","/chat/stream","/chat/agent","/chat/agentic","/sync/state","/admin/errors","/bridge/enqueue","/bridge/poll","/bridge/result","/chat/vision","/image/generate","/image/generate-and-store","/speak","/tts","/stt","/weather","/feature-request","/conversations","/history","/memory","/memory/clear","/slack/post","/telegram/send","/telegram/setup","/discord/send","/discord/interactions","/discord/register-commands","/discord/invite","/prefs","/ranking","/presence","/github/*","/vercel/*","/drive/upload","/drive/search","/drive/delete","/drive/ld-mkdir","/drive/ld-search","/drive/ld-copy","/google/oauth-start","/google/oauth-callback","/google/calendar/events","/agent/propose"],
+          routes: ["/health","/chat/smart","/chat/stream","/chat/agent","/chat/agentic","/sync/state","/admin/errors","/bridge/enqueue","/bridge/poll","/bridge/result","/chat/vision","/image/generate","/speak","/tts","/stt","/weather","/feature-request","/conversations","/history","/memory","/memory/clear","/slack/post","/telegram/send","/telegram/setup","/discord/send","/discord/interactions","/discord/register-commands","/discord/invite","/prefs","/ranking","/presence","/github/*","/vercel/*","/drive/upload","/drive/search","/drive/delete","/drive/ld-mkdir","/drive/ld-search","/drive/ld-copy","/google/oauth-start","/google/oauth-callback","/google/calendar/events","/agent/propose"],
           models: Object.keys(MODELS),
           providers: {
             groq: !!env.GROQ_API_KEY,
@@ -4020,7 +3924,6 @@ export default {
       if (path === "/chat/agent"   && method === "POST") { const _pr=await pinOk(request,env); if(_pr!==true) return pinRequired(_pr); return handleChatAgent(request, env); }
       if (path === "/chat/vision"  && method === "POST") { const _pr=await pinOk(request,env); if(_pr!==true) return pinRequired(_pr); return handleChatVision(request, env); }
       if (path === "/image/generate" && method === "POST") { const _pr=await pinOk(request,env); if(_pr!==true) return pinRequired(_pr); return handleImageGenerate(request, env); }
-      if (path === "/image/generate-and-store" && method === "POST") { const _pr=await pinOk(request,env); if(_pr!==true) return pinRequired(_pr); return handleImageGenerateAndStore(request, env); }
       if (path === "/speak"        && method === "POST") { const _pr=await pinOk(request,env); if(_pr!==true) return pinRequired(_pr); return handleSpeak(request, env); }
       if (path === "/tts"          && method === "POST") { const _pr=await pinOk(request,env); if(_pr!==true) return pinRequired(_pr); return handleSpeak(request, env); }
       if (path === "/stt"          && method === "POST") { const _pr=await pinOk(request,env); if(_pr!==true) return pinRequired(_pr); return handleSTT(request, env); }
@@ -4162,9 +4065,11 @@ export default {
       if (path === "/messages/send"   && method === "POST") { const _pr=await pinOk(request,env); if(_pr!==true) return pinRequired(_pr); const _pu=await identifyPin(request,env)||'paddy'; return handleMsgSend(request, env, _pu); }
       if (path === "/messages/read"   && method === "GET")  { const _pr=await pinOk(request,env); if(_pr!==true) return pinRequired(_pr); const _pu=await identifyPin(request,env)||'paddy'; return handleMsgRead(request, env, _pu); }
       if (path === "/messages/unread" && method === "GET")  { const _pr=await pinOk(request,env); if(_pr!==true) return pinRequired(_pr); const _pu=await identifyPin(request,env)||'paddy'; return handleMsgUnread(request, env, _pu); }
+      
       return json({ ok: false, error: "Not Found", path }, 404);
     } catch (e) {
       return err("unhandled: " + (e.message || String(e)), 500);
     }
   },
 };
+--05f3aa70c5095b0e73b7f27e69e0804768a7a5c7e533ce6958cf63dd910e--
