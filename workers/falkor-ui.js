@@ -1,5 +1,5 @@
 const SW_CODE = `
-const CACHE = 'falkor-v9.33.0';
+const CACHE = 'falkor-v9.35.0';
 const CACHE_URLS = ['/'];
 
 self.addEventListener('install', e => {
@@ -16,6 +16,8 @@ self.addEventListener('activate', e => {
       .then(clients => {
         clients.forEach(c => {
           c.postMessage({type:'SW_UPDATED',version:CACHE});
+          // Force reload so stale cached code is replaced
+          c.navigate && c.navigate(c.url).catch(()=>{});
         });
       })
   );
@@ -95,7 +97,7 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.pathname === '/health') {
-      return new Response(JSON.stringify({status:'ok',version:'9.33.0',worker:'falkor-ui'}), {
+      return new Response(JSON.stringify({status:'ok',version:'9.35.0',worker:'falkor-ui'}), {
         headers: {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'}
       });
     }
