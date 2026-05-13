@@ -159,7 +159,7 @@ async function callSubAgent(agentKey, action, text, pin, aiPin, intentCtx) {
       }
       case 'brain':
         return fetch(`${baseUrl}/recall`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Pin': pin },
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Pin': aiPin || '535554' },
           body: JSON.stringify({ query: text, top_k: 5, answer: true }),
         }).then(r => r.ok ? r.json() : null);
       case 'workflows':
