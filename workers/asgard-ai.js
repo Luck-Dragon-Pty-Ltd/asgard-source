@@ -1076,6 +1076,92 @@ async function handleImageGenerate(request, env) {
   return json({ ok: true, url: imageUrl, revised_prompt: image && image.revised_prompt, model });
 }
 
+// ---------- Image generate-and-store (DALL-E 3 / gpt-image-1 → Supabase permanent URL) ----------
+async function handleImageGenerateAndStore(request, env) {
+  const body = await request.json().catch(() => ({}));
+  const prompt = (body.prompt || '').toString();
+  const folder = (body.folder || 'general').replace(/[^a-z0-9_-]/gi, '-');
+  const size = body.size || '1024x1024';
+  const model = body.model || 'dall-e-3';
+  const style = body.style || 'vivid';
+  const quality = body.quality || (model === 'gpt-image-1' ? 'medium' : 'standard');
+  const uid = body.uid || 'paddy';
+  const filename = body.filename || (Date.now() + '-' + Math.random().toString(36).slice(2,8) + '.png');
+
+  if (!prompt) return err('prompt required', 400);
+  if (!env.OPENAI_API_KEY) return err('OPENAI_API_KEY missing', 500);
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_KEY) return err('Supabase not configured', 500);
+
+  // Step 1: Generate image (always request b64_json for storage)
+  // gpt-image-1 doesn't support response_format (always b64_json)
+  // dall-e-3 needs response_format: 'b64_json' explicitly
+  const reqBody = { model, prompt, size, quality, n: 1 };
+  if (model === 'dall-e-3') {
+    reqBody.style = style;
+    reqBody.response_format = 'b64_json';
+  }
+  const genRes = await fetch('https://api.openai.com/v1/images/generations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + env.OPENAI_API_KEY },
+    body: JSON.stringify(reqBody),
+  });
+  if (!genRes.ok) { const t = await genRes.text(); return err('image-gen ' + genRes.status + ': ' + t.slice(0,300), 502); }
+  const genData = await genRes.json();
+  const image = genData.data && genData.data[0];
+  if (!image) return err('no image data returned', 502);
+  // gpt-image-1 always returns b64_json; dall-e-3 returns b64_json when requested
+  const b64 = image.b64_json || (image.url ? null : null);
+  if (!image.b64_json && !image.url) return err('no image data in response', 502);
+
+  // Step 2: Upload to Supabase generated-images bucket
+  const path = folder + '/' + filename;
+  // Get bytes: from b64_json directly, or fetch from temporary URL
+  let bytes;
+  if (image.b64_json) {
+    const binary = atob(image.b64_json);
+    bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  } else {
+    // dall-e-3 without response_format returns a temporary URL — fetch and store
+    const imgRes = await fetch(image.url);
+    if (!imgRes.ok) return err('failed to fetch generated image URL', 502);
+    bytes = new Uint8Array(await imgRes.arrayBuffer());
+  }
+
+  const uploadRes = await fetch(env.SUPABASE_URL + '/storage/v1/object/generated-images/' + path, {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + env.SUPABASE_SERVICE_KEY,
+      'Content-Type': 'image/png',
+      'x-upsert': 'true',
+    },
+    body: bytes,
+  });
+  if (!uploadRes.ok) {
+    const t = await uploadRes.text();
+    return err('supabase-upload ' + uploadRes.status + ': ' + t.slice(0,200), 502);
+  }
+
+  // Step 3: Build permanent public URL
+  const publicUrl = env.SUPABASE_URL + '/storage/v1/object/public/generated-images/' + path;
+
+  // Log spend
+  try {
+    const _cost = SPEND_PER_IMAGE[model] || 0.040;
+    await bgLog(env, { provider: 'openai', model, endpoint: 'image-store',
+      prompt_tokens: 0, completion_tokens: 0, cost_usd: _cost, uid, sid: null });
+  } catch(e) {}
+
+  return json({
+    ok: true,
+    url: publicUrl,
+    path,
+    model,
+    revised_prompt: image.revised_prompt,
+    folder,
+  });
+}
+
 // ---------- NEW: TTS via ElevenLabs ----------
 async function handleSpeak(request, env) {
   const body = await request.json().catch(() => ({}));
@@ -2201,6 +2287,56 @@ const AGENTIC_TOOLS_OPENAI = [
       group: { type: "string", description: "Group name or ID" },
       limit: { type: "number", description: "Max messages to return (default 20)" }
     }, required: ["group"] } } }
+,
+  // ─── Doc Rating ─────────────────────────────────────────────────────────
+  { type: "function", function: {
+    name: "rate_doc",
+    description: "Rate a Google Drive file (1-5 stars) and optionally add notes. Stores in D1. Use to track doc quality, relevance, or usefulness.",
+    parameters: { type: "object", properties: {
+      file_id:   { type: "string", description: "Google Drive file ID" },
+      file_name: { type: "string", description: "Human-readable name of the file" },
+      rating:    { type: "number", description: "Rating 1-5 stars (1=poor, 5=excellent)" },
+      notes:     { type: "string", description: "Optional notes about the document" },
+      category:  { type: "string", description: "Optional category e.g. handover, brief, spec, idea" }
+    }, required: ["file_id","rating"] }
+  }},
+  { type: "function", function: {
+    name: "get_doc_ratings",
+    description: "Get ratings for Drive docs. Can filter by file_id or category. Returns recent ratings from D1.",
+    parameters: { type: "object", properties: {
+      file_id:  { type: "string", description: "Filter by specific file ID (optional)" },
+      category: { type: "string", description: "Filter by category (optional)" },
+      limit:    { type: "number", description: "Max results, default 10" }
+    }, required: [] }
+  }},
+  // ─── Doc Editing (Google Docs API) ──────────────────────────────────────
+  { type: "function", function: {
+    name: "docs_replace_text",
+    description: "Find and replace text inside a Google Doc using the Docs API batchUpdate. Works on Google Docs (not plain Drive files).",
+    parameters: { type: "object", properties: {
+      doc_id:       { type: "string", description: "Google Docs document ID (from the URL)" },
+      find:         { type: "string", description: "Text to find" },
+      replace_with: { type: "string", description: "Text to replace it with" },
+      match_case:   { type: "boolean", description: "Case-sensitive match (default false)" }
+    }, required: ["doc_id","find","replace_with"] }
+  }},
+  { type: "function", function: {
+    name: "docs_append_text",
+    description: "Append text to the end of a Google Doc. Good for adding notes, summaries, or log entries.",
+    parameters: { type: "object", properties: {
+      doc_id: { type: "string", description: "Google Docs document ID" },
+      text:   { type: "string", description: "Text to append (use \\n for newlines)" }
+    }, required: ["doc_id","text"] }
+  }},
+  { type: "function", function: {
+    name: "drive_patch",
+    description: "Replace the full content of a Drive file (for plain text or markdown files, NOT Google Docs). Reads the file, applies your changes, writes back.",
+    parameters: { type: "object", properties: {
+      file_id:     { type: "string", description: "Drive file ID" },
+      new_content: { type: "string", description: "The complete new content of the file" },
+      mime_type:   { type: "string", description: "MIME type, e.g. text/markdown or text/plain (default text/plain)" }
+    }, required: ["file_id","new_content"] }
+  }}
 ];
 
 function _agSanitizeForGemini(schema) {
@@ -2248,6 +2384,25 @@ async function _agentLdAccessToken(env) {
   });
   if (!r.ok) throw new Error("LD token refresh failed: " + (await r.text()).slice(0, 200));
   return (await r.json()).access_token;
+}
+
+
+// Full-scope Drive/Docs token (uses GOOGLE_REFRESH_TOKEN — has calendar+drive+docs write)
+async function _agentFullAccessToken(env) {
+  const refresh = env.GOOGLE_REFRESH_TOKEN || env.LD_GOOGLE_REFRESH_TOKEN;
+  if (!refresh) throw new Error("GOOGLE_REFRESH_TOKEN missing");
+  const r = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: env.GOOGLE_CLIENT_ID_ASGARD_AI || env.GOOGLE_CLIENT_ID,
+      client_secret: env.GOOGLE_CLIENT_SECRET_ASGARD_AI || env.GOOGLE_CLIENT_SECRET,
+      refresh_token: refresh,
+      grant_type: "refresh_token"
+    }).toString()
+  });
+  if (!r.ok) throw new Error("Full token refresh failed: " + (await r.text()).slice(0,200));
+  const d = await r.json();
+  return d.access_token;
 }
 
 
@@ -2411,7 +2566,7 @@ async function agenticExecuteTool(name, input, env) {
     }
     if (name === "drive_upload") {
       const { filename, content, mime = "text/plain", parent } = input || {};
-      const access = await _agentLdAccessToken(env);
+      const access = await _agentFullAccessToken(env);
       const parentId = parent || ASGARD_DRIVE_FOLDER;
       const boundary = "----asgard-agent-" + Math.random().toString(36).slice(2);
       const meta = JSON.stringify({ name: filename, parents: [parentId] });
@@ -2690,7 +2845,7 @@ async function agenticExecuteTool(name, input, env) {
     }
     if (name === "drive_share") {
       if (!env.LD_GOOGLE_REFRESH_TOKEN) return { error: "LD_GOOGLE_REFRESH_TOKEN missing" };
-      const access = await _agentLdAccessToken(env);
+      const access = await _agentFullAccessToken(env);
       const r = await fetch(
         "https://www.googleapis.com/drive/v3/files/" + encodeURIComponent(input.file_id) + "/permissions?supportsAllDrives=true&sendNotificationEmail=" + (input.sendNotificationEmail ? "true" : "false"),
         { method: "POST", headers: { "Authorization": "Bearer " + access, "Content-Type": "application/json" },
@@ -2744,6 +2899,90 @@ async function agenticExecuteTool(name, input, env) {
       const now = Date.now();
       await env.DB.prepare("INSERT INTO msg_inbox (group_id, from_user, body, created_at) VALUES (?, ?, ?, ?)").bind(g.id, pinUser, message, now).run();
       return { ok: true, sent_to: g.name, from: pinUser };
+    }
+    if (name === "rate_doc") {
+      const { file_id, file_name, rating, notes, category } = input || {};
+      if (!file_id || !rating) return { error: "file_id and rating required" };
+      if (rating < 1 || rating > 5) return { error: "rating must be 1-5" };
+      if (!env.DB) return { error: "no DB binding" };
+      await env.DB.prepare(
+        "INSERT INTO doc_ratings (file_id, file_name, rating, notes, category) VALUES (?,?,?,?,?)"
+      ).bind(file_id, file_name || null, Math.round(rating), notes || null, category || null).run();
+      const stars = "★".repeat(Math.round(rating)) + "☆".repeat(5-Math.round(rating));
+      return { ok: true, file_id, rating, stars, notes, category, message: `Rated ${file_name||file_id}: ${stars}` };
+    }
+    if (name === "get_doc_ratings") {
+      const { file_id, category, limit } = input || {};
+      if (!env.DB) return { error: "no DB binding" };
+      let sql = "SELECT * FROM doc_ratings WHERE 1=1";
+      const params = [];
+      if (file_id) { sql += " AND file_id=?"; params.push(file_id); }
+      if (category) { sql += " AND category=?"; params.push(category); }
+      sql += " ORDER BY created_at DESC LIMIT ?"; params.push(limit || 10);
+      const rows = await env.DB.prepare(sql).bind(...params).all();
+      const results = (rows.results||[]).map(r => ({
+        ...r, stars: "★".repeat(r.rating) + "☆".repeat(5-r.rating)
+      }));
+      return { ok: true, count: results.length, ratings: results };
+    }
+    if (name === "docs_replace_text") {
+      const { doc_id, find, replace_with, match_case } = input || {};
+      if (!doc_id || find == null || replace_with == null) return { error: "doc_id, find, replace_with required" };
+      const access = await _agentFullAccessToken(env);
+      const body = {
+        requests: [{ replaceAllText: {
+          containsText: { text: find, matchCase: match_case || false },
+          replaceText: replace_with
+        }}]
+      };
+      const r = await fetch(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(doc_id)}:batchUpdate`, {
+        method: "POST",
+        headers: { "Authorization": "Bearer " + access, "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      if (!r.ok) {
+        const err = await r.text();
+        return { error: "docs_replace_text " + r.status, detail: err.slice(0,300) };
+      }
+      const data = await r.json();
+      const count = (data.replies||[{}])[0]?.replaceAllText?.occurrencesChanged || 0;
+      return { ok: true, doc_id, find, replace_with, occurrences_changed: count };
+    }
+    if (name === "docs_append_text") {
+      const { doc_id, text } = input || {};
+      if (!doc_id || !text) return { error: "doc_id and text required" };
+      const access = await _agentFullAccessToken(env);
+      // Get doc to find end index
+      const docR = await fetch(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(doc_id)}`, {
+        headers: { "Authorization": "Bearer " + access }
+      });
+      if (!docR.ok) return { error: "docs_append fetch doc " + docR.status };
+      const doc = await docR.json();
+      const endIdx = doc.body?.content?.slice(-1)[0]?.endIndex || 1;
+      const body = {
+        requests: [{ insertText: { location: { index: endIdx - 1 }, text: "\n" + text } }]
+      };
+      const r = await fetch(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(doc_id)}:batchUpdate`, {
+        method: "POST",
+        headers: { "Authorization": "Bearer " + access, "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      if (!r.ok) return { error: "docs_append batchUpdate " + r.status, detail: (await r.text()).slice(0,300) };
+      return { ok: true, doc_id, chars_appended: text.length };
+    }
+    if (name === "drive_patch") {
+      const { file_id, new_content, mime_type } = input || {};
+      if (!file_id || !new_content) return { error: "file_id and new_content required" };
+      const access = await _agentFullAccessToken(env);
+      const mime = mime_type || "text/plain";
+      const r = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(file_id)}?uploadType=media&supportsAllDrives=true`, {
+        method: "PATCH",
+        headers: { "Authorization": "Bearer " + access, "Content-Type": mime },
+        body: new_content
+      });
+      if (!r.ok) return { error: "drive_patch " + r.status, detail: (await r.text()).slice(0,300) };
+      const data = await r.json();
+      return { ok: true, file_id, size: new_content.length, name: data.name, modifiedTime: data.modifiedTime };
     }
     if (name === "read_messages") {
       const { group, limit = 20 } = input || {};
@@ -3708,7 +3947,7 @@ export default {
       if (path === "/health") {
         return json({
           ok: true, worker: WORKER_NAME, version: VERSION,
-          routes: ["/health","/chat/smart","/chat/stream","/chat/agent","/chat/agentic","/sync/state","/admin/errors","/bridge/enqueue","/bridge/poll","/bridge/result","/chat/vision","/image/generate","/speak","/tts","/stt","/weather","/feature-request","/conversations","/history","/memory","/memory/clear","/slack/post","/telegram/send","/telegram/setup","/discord/send","/discord/interactions","/discord/register-commands","/discord/invite","/prefs","/ranking","/presence","/github/*","/vercel/*","/drive/upload","/drive/search","/drive/delete","/drive/ld-mkdir","/drive/ld-search","/drive/ld-copy","/google/oauth-start","/google/oauth-callback","/google/calendar/events","/agent/propose"],
+          routes: ["/health","/chat/smart","/chat/stream","/chat/agent","/chat/agentic","/sync/state","/admin/errors","/bridge/enqueue","/bridge/poll","/bridge/result","/chat/vision","/image/generate","/image/generate-and-store","/speak","/tts","/stt","/weather","/feature-request","/conversations","/history","/memory","/memory/clear","/slack/post","/telegram/send","/telegram/setup","/discord/send","/discord/interactions","/discord/register-commands","/discord/invite","/prefs","/ranking","/presence","/github/*","/vercel/*","/drive/upload","/drive/search","/drive/delete","/drive/ld-mkdir","/drive/ld-search","/drive/ld-copy","/google/oauth-start","/google/oauth-callback","/google/calendar/events","/agent/propose"],
           models: Object.keys(MODELS),
           providers: {
             groq: !!env.GROQ_API_KEY,
@@ -3768,6 +4007,7 @@ export default {
       if (path === "/chat/agent"   && method === "POST") { const _pr=await pinOk(request,env); if(_pr!==true) return pinRequired(_pr); return handleChatAgent(request, env); }
       if (path === "/chat/vision"  && method === "POST") { const _pr=await pinOk(request,env); if(_pr!==true) return pinRequired(_pr); return handleChatVision(request, env); }
       if (path === "/image/generate" && method === "POST") { const _pr=await pinOk(request,env); if(_pr!==true) return pinRequired(_pr); return handleImageGenerate(request, env); }
+      if (path === "/image/generate-and-store" && method === "POST") { const _pr=await pinOk(request,env); if(_pr!==true) return pinRequired(_pr); return handleImageGenerateAndStore(request, env); }
       if (path === "/speak"        && method === "POST") { const _pr=await pinOk(request,env); if(_pr!==true) return pinRequired(_pr); return handleSpeak(request, env); }
       if (path === "/tts"          && method === "POST") { const _pr=await pinOk(request,env); if(_pr!==true) return pinRequired(_pr); return handleSpeak(request, env); }
       if (path === "/stt"          && method === "POST") { const _pr=await pinOk(request,env); if(_pr!==true) return pinRequired(_pr); return handleSTT(request, env); }
