@@ -47,12 +47,58 @@ const ROUTES = {
   '/hobsonsbay': HOBSONSBAY_DIVISION,
 };
 
+async function handleBilling(request, env){
+  const url = new URL(request.url);
+  if (request.method === 'POST'){
+    let email = '';
+    try {
+      const fd = await request.formData();
+      email = (fd.get('email')||'').toString().trim().toLowerCase();
+    } catch(_) {}
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return new Response(billingFormHTML('Please enter a valid email address.'), { headers: HTML_HEADERS });
+    }
+    try {
+      const findRes = await fetch('https://api.stripe.com/v1/customers?email=' + encodeURIComponent(email) + '&limit=1', {
+        headers: { Authorization: 'Bearer ' + env.STRIPE_SECRET_KEY }
+      });
+      const findData = await findRes.json();
+      const cust = (findData.data || [])[0];
+      if (!cust) {
+        return new Response(billingFormHTML('No subscription found for <strong>' + email + '</strong>. If you subscribed under a different email, try that one. Need help? <a href="/contact">Contact us</a>.'), { headers: HTML_HEADERS });
+      }
+      const body = new URLSearchParams({ customer: cust.id, return_url: 'https://schoolsportportal.com.au/' });
+      const sessRes = await fetch('https://api.stripe.com/v1/billing_portal/sessions', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + env.STRIPE_SECRET_KEY, 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString()
+      });
+      const sess = await sessRes.json();
+      if (!sess.url) {
+        return new Response(billingFormHTML('Could not open billing portal: ' + ((sess.error && sess.error.message) || 'unknown error') + '. Please <a href="/contact">contact us</a>.'), { headers: HTML_HEADERS });
+      }
+      return Response.redirect(sess.url, 302);
+    } catch(e) {
+      return new Response(billingFormHTML('Error: ' + (e.message || 'unknown') + '. Please try again or <a href="/contact">contact us</a>.'), { headers: HTML_HEADERS });
+    }
+  }
+  return new Response(billingFormHTML(), { headers: HTML_HEADERS });
+}
+
+function billingFormHTML(msg){
+  const errBlock = msg ? `<div class="msg">${msg}</div>` : '';
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Manage subscription — School Sport Portal</title><style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f172a;color:#e5e7eb;margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}.card{background:#1e293b;border:1px solid #334155;border-radius:14px;padding:32px;max-width:440px;width:100%;box-shadow:0 10px 40px rgba(0,0,0,0.4)}h1{margin:0 0 8px;font-size:24px;font-weight:700}p{color:#94a3b8;margin:0 0 22px;line-height:1.5}input{width:100%;padding:12px 14px;background:#0f172a;border:1px solid #475569;border-radius:8px;color:#fff;font-size:15px;box-sizing:border-box;margin-bottom:14px}button{width:100%;padding:13px;background:#3b82f6;border:none;border-radius:8px;color:#fff;font-size:15px;font-weight:600;cursor:pointer}button:hover{background:#2563eb}.msg{background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);color:#fca5a5;padding:10px 14px;border-radius:8px;font-size:13px;margin-bottom:18px}a{color:#60a5fa}.back{display:inline-block;margin-top:16px;font-size:13px;color:#94a3b8;text-decoration:none}</style></head><body><div class="card"><h1>Manage subscription</h1><p>Enter the email you used to subscribe. We\'ll send you to the Stripe Customer Portal to update your card, see invoices, or cancel.</p>${errBlock}<form method="POST" action="/billing"><input type="email" name="email" placeholder="you@school.edu.au" required autofocus><button type="submit">Open billing portal →</button></form><a class="back" href="/">← Back to School Sport Portal</a></div></body></html>`;
+}
+
 export default {
-  async fetch(request){
+  async fetch(request, env){
     const url = new URL(request.url);
     const p = url.pathname.replace(/\/$/,'') || '/';
+    if (p === '/billing' || p === '/manage' || p === '/portal/manage'){
+      return handleBilling(request, env);
+    }
     if (p === '/health'){
-      return json_({ ok:true, worker:'schoolsportportal', version:'2026-04-29-redesign', ts: new Date().toISOString() });
+      return json_({ ok:true, worker:'schoolsportportal', version:'2026-05-14-billing', ts: new Date().toISOString() });
     }
     if (p === '/api/data.json'){
       return json_(DATA_JSON);
