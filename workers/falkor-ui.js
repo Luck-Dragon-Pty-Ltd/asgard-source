@@ -193,7 +193,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .sidebar-scrim{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:99;backdrop-filter:blur(2px)}
 .sidebar-top{display:flex;align-items:center;justify-content:space-between;padding:16px 14px 12px}
 .logo-text{font-size:18px;font-weight:800;letter-spacing:-0.5px;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.new-chat-btn{margin:0 10px 8px;padding:9px;font-size:14px;border-radius:8px;background:rgba(108,99,255,.15);border:1px solid rgba(108,99,255,.25);color:var(--accent);font-weight:600}
+.new-chat-btn{margin:0 10px 8px;width:calc(100% - 20px);padding:9px;font-size:14px;border-radius:8px;background:rgba(108,99,255,.15);border:1px solid rgba(108,99,255,.25);color:var(--accent);font-weight:600;box-sizing:border-box}
 .new-chat-btn:hover{background:rgba(108,99,255,.25);opacity:1}
 
 /* Sidebar search */
@@ -202,12 +202,12 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .sidebar-search input:focus{border-color:var(--accent)}
 .sidebar-search-icon{position:absolute;left:9px;top:50%;transform:translateY(-50%);font-size:13px;color:var(--muted);pointer-events:none}
 
-.convo-list{flex:1;overflow-y:auto;overflow-x:hidden;padding:2px 6px;box-sizing:border-box}
-.convo-item{display:flex;align-items:center;gap:6px;padding:9px 10px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--text);transition:background .1s;position:relative;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;min-width:0;max-width:100%;box-sizing:border-box}
+.convo-list{flex:1;overflow-y:auto;padding:2px 6px}
+.convo-item{display:flex;align-items:center;gap:6px;padding:9px 10px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--text);transition:background .1s;position:relative;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .convo-item:hover{background:rgba(255,255,255,.06)}
 .convo-item.active{background:rgba(108,99,255,.15);color:var(--accent2);font-weight:500}
 .convo-icon{flex-shrink:0;font-size:14px}
-.convo-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.convo-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .convo-del{margin-left:auto;opacity:0;font-size:12px;color:var(--muted);padding:2px 5px;border-radius:4px;flex-shrink:0;transition:opacity .1s}
 .convo-item:hover .convo-del{opacity:.7}
 .convo-del:hover{opacity:1 !important;color:var(--danger)}
