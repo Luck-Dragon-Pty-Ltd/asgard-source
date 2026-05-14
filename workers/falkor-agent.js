@@ -596,8 +596,9 @@ function autoPickModel(text, hasSystemPrefix, productContext) {
   if (!text) return 'haiku';
   const t = String(text);
   const lower = t.toLowerCase();
-  // Very short / casual → fast cheap model
-  if (t.length < 50 && !/code|debug|why|how|fix|deploy|explain/i.test(t)) return 'groq-fast';
+  // v2.20.1: never default to groq-fast — Groq tool calling is flaky + rate-limited.
+  // Short casual → haiku (fast, reliable tool use, no rate cap)
+  if (t.length < 50 && !/code|debug|why|how|fix|deploy|explain/i.test(t)) return 'haiku';
   // Code / engineering signals → sonnet (best agentic + tool use)
   if (/\bcode\b|\bdebug\b|\brefactor\b|\bfix\b|\bdeploy\b|\bworker\b|\bschema\b|\bd1\b|\bsql\b|\bbug\b|\berror\b|\bstack trace\b|```/i.test(lower)) return 'sonnet';
   // Hard reasoning signals → sonnet
@@ -729,7 +730,7 @@ export class FalkorAgent {
       const memory = await this.getMemory();
       const ctxTs = await this.state.storage.get('liveContextTs');
       return corsJson({
-        version: '2.20.0',
+        version: '2.20.1',
         activeSessions: this.sessions.size,
         historyLength: history.length,
         memoryKeys: Object.keys(memory).length,
@@ -1235,7 +1236,7 @@ export default {
     }
 
     if (url.pathname === '/health') {
-      return Response.json({ status: 'ok', version: '2.20.0', worker: 'falkor-agent' });
+      return Response.json({ status: 'ok', version: '2.20.1', worker: 'falkor-agent' });
     }
 
     // ── /tasks proxy → falkor-workflows via service binding (no 522 loopback) ──
