@@ -591,6 +591,57 @@ async function maybeExtractMemory(history, userId, pin, aiPin, aiUrl) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ── v2.17.0 — anti-hallucination safety net (server-side) ──────────────────
+const FORBIDDEN_PHRASES = [
+  '522 timeout', 'D1 hung', 'D1 query is hung', 'D1 memory queries are hung',
+  'infinite loop', 'last known good state', "can't reach asgard-ai",
+  'asgard-ai is down', "can't fetch project_hub until it's back",
+  "can't self-deploy asgard-ai", 'rollback to the last working version',
+  'manual revert', 'manual fix via CF dashboard',
+];
+function containsHallucinatedOutage(text) {
+  if (!text || typeof text !== 'string') return false;
+  const lower = text.toLowerCase();
+  return FORBIDDEN_PHRASES.some(p => lower.includes(p.toLowerCase()));
+}
+async function probeAsgardAi(aiUrl) {
+  try {
+    const r = await fetch(aiUrl + '/health', { signal: AbortSignal.timeout(5000) });
+    return r.status === 200;
+  } catch (e) { return false; }
+}
+function detectProjectListIntent(text) {
+  if (!text) return null;
+  const t = text.toLowerCase().trim();
+  const verbs = ['list', 'show', 'sort', 'order', 'alphabetize', 'put', 'arrange'];
+  const target = t.includes('project');
+  const hasVerb = verbs.some(v => t.startsWith(v) || t.includes(' ' + v + ' '));
+  if (!target || !hasVerb) return null;
+  if (t.includes('alpha') || t.includes('a-z') || t.includes('a to z')) return 'alpha';
+  if (t.includes('number') || t.includes('id') || t.includes('#')) return 'number';
+  if (t.includes('status')) return 'status';
+  if (t.includes('progress')) return 'progress';
+  return 'alpha';
+}
+async function fetchProjectsList(aiUrl, aiPin) {
+  try {
+    const r = await fetch(aiUrl + '/admin/projects/list', { headers: { 'X-Pin': aiPin } });
+    if (!r.ok) return null;
+    const d = await r.json();
+    return d.projects || [];
+  } catch (e) { return null; }
+}
+function formatProjectsList(projects, order) {
+  if (!projects || !projects.length) return 'No projects in project_hub.';
+  let list = projects.filter(p => !(p.status && p.status.indexOf('merged_into_') === 0));
+  if (order === 'alpha') list.sort((a,b) => (a.project_name||'').localeCompare(b.project_name||''));
+  else if (order === 'number') list.sort((a,b) => (a.id||0) - (b.id||0));
+  else if (order === 'status') list.sort((a,b) => (a.status||'').localeCompare(b.status||''));
+  else if (order === 'progress') list.sort((a,b) => (b.progress_pct||0) - (a.progress_pct||0));
+  const lines = list.map(p => '#' + p.id + ' ' + (p.project_name||'?') + ' — ' + (p.status||'?') + (p.progress_pct!=null ? ' (' + p.progress_pct + '%)' : ''));
+  return 'All ' + list.length + ' projects in project_hub:\n\n' + lines.join('\n');
+}
+
 export class FalkorAgent {
   constructor(state, env) {
     this.state = state;
@@ -646,7 +697,7 @@ export class FalkorAgent {
       const memory = await this.getMemory();
       const ctxTs = await this.state.storage.get('liveContextTs');
       return corsJson({
-        version: '2.16.0',
+        version: '2.17.0',
         activeSessions: this.sessions.size,
         historyLength: history.length,
         memoryKeys: Object.keys(memory).length,
@@ -757,6 +808,24 @@ export class FalkorAgent {
     const systemExtra = memoryLines ? '\n\nUser facts you remember:\n' + memoryLines : '';
 
     this.broadcast({ type: 'user_message', text, model });
+
+    // ── v2.17.0 INTERCEPT: project listing requests handled directly ─────────
+    const _projectIntent = detectProjectListIntent(text);
+    if (_projectIntent) {
+      this.broadcast({ type: 'tool_status', msgId: 'msg_' + Date.now(), text: 'Falkor is fetching project_hub...' });
+      const _projs = await fetchProjectsList(aiUrl, aiPin);
+      if (_projs) {
+        const _formatted = formatProjectsList(_projs, _projectIntent);
+        const _msgId = 'msg_' + Date.now();
+        this.broadcast({ type: 'assistant_reply', msgId: _msgId, text: _formatted, model: 'direct' });
+        const _hist = await this.getHistory();
+        _hist.push({ role: 'user', content: text.slice(0,4000), ts: Date.now() });
+        _hist.push({ role: 'assistant', content: _formatted.slice(0,4000), ts: Date.now() });
+        await this.state.storage.put('history', JSON.stringify(_hist.slice(-200)));
+        return _formatted;
+      }
+    }
+
 
     // ── 1. Check for action intents FIRST ────────────────────────────────────
     const action = detectAction(text);
@@ -1033,6 +1102,15 @@ export class FalkorAgent {
       }
     }
 
+    // ── v2.17.0 SAFETY NET: catch hallucinated outage replies ───────────────
+    if (containsHallucinatedOutage(reply)) {
+      const _aiOk = await probeAsgardAi(aiUrl);
+      if (_aiOk) {
+        const _origReply = reply;
+        reply = "I started to say there was an outage — that was wrong. asgard-ai is healthy (just checked /health). Try your request again and I'll do it properly.";
+        try { console.warn('[falkor-agent v2.17] suppressed hallucination:', _origReply.slice(0,200)); } catch(e) {}
+      }
+    }
     // ── 7. Save to history ────────────────────────────────────────────────────
     history.push({ role: 'user', content: text.slice(0, 4000), ts: Date.now() });
     history.push({ role: 'assistant', content: reply.slice(0, 4000), ts: Date.now() });
@@ -1103,7 +1181,7 @@ export default {
     }
 
     if (url.pathname === '/health') {
-      return Response.json({ status: 'ok', version: '2.16.0', worker: 'falkor-agent' });
+      return Response.json({ status: 'ok', version: '2.17.0', worker: 'falkor-agent' });
     }
 
     // ── /tasks proxy → falkor-workflows via service binding (no 522 loopback) ──
