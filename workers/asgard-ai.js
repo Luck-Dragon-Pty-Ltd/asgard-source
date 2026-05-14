@@ -1,5 +1,5 @@
 // asgard-ai v5.8.0-stream: multi-provider (Anthropic/OpenAI/Groq) streaming SSE, normalized tokens
-const VERSION = '6.10.0';
+const VERSION = '6.11.0';
 const WORKER_NAME = "asgard-ai";
 
 // --- PIN auth helper (v1.1.0 security patch) ---
@@ -3992,11 +3992,14 @@ export default {
         // Ask Haiku to extract structured info
         const extractPrompt = `You are extracting structured information from a CONTENT BLOB (could be a chat, a spec, notes, a doc, a project plan, anything) so it can be saved into Paddy's Asgard knowledge base. Read whatever's there and pull out the durable signal.
 
-Read the transcript below and return a JSON object with these arrays:
-- "facts": durable facts about Paddy / his projects / his world. Each fact: { project: slug-string-or-global, key: short-slug, value: "the fact, 1-2 sentences", category: "preference"|"identity"|"decision"|"technical"|"family"|"work"|"misc" }
-- "decisions": project decisions made. Each: { project: slug, event: short-slug, summary: "what was decided, 1-2 sentences" }
-- "state_updates": where each project is up to. Each: { project: slug, next_action: "what's next, 1 sentence", notes: "current state, short" }
-- "concepts": high-level vision / plan for a project. Each: { project: slug, concept_md: "1-3 paragraphs of vision/plan in markdown" }
+Read the content below and return a JSON object with these arrays:
+- "facts": durable facts about Paddy / his projects / his world. Each: { project: slug-or-global, key: short-slug, value: "1-2 sentences", category: "preference"|"identity"|"decision"|"technical"|"family"|"work"|"misc" }
+- "decisions": specific decisions made. Each: { project: slug, event: short-slug, summary: "1-2 sentences" }
+- "state_updates": where each project is up to. Each: { project: slug, next_action: "1 sentence what's next", notes: "current state" }
+- "concepts": high-level vision / plan. Each: { project: slug, concept_md: "1-3 paragraphs in markdown" }
+- "rules": durable rules / playbooks ("always commit to GH first", "default model is Haiku"). Each: { project: slug-or-global, key: short-slug, value: "the rule, 1 sentence" }
+- "links": URLs that matter (live URLs, dashboards, docs, references). Each: { project: slug-or-global, label: short, url: "https://..." }
+- "repos": GitHub or other repo references. Each: { project: slug, repo_url: "https://github.com/...", notes: "what's there" }
 
 Project slugs (use exact strings): asgard-final-build, falkor-chat-pwa, kbt, sportcarnival, save-my-seat, school-sport-portal, lessonlab, super-league, family-footy-tipping, personal-finance, my-betting-hq, long-range-tipping, horse-race-tipping, ideas, global (for facts not project-specific).
 
@@ -4037,13 +4040,16 @@ ${transcript.slice(0, 100000)}`;
         const decisions = Array.isArray(extracted.decisions) ? extracted.decisions : [];
         const states = Array.isArray(extracted.state_updates) ? extracted.state_updates : [];
         const concepts = Array.isArray(extracted.concepts) ? extracted.concepts : [];
+        const rules = Array.isArray(extracted.rules) ? extracted.rules : [];
+        const links = Array.isArray(extracted.links) ? extracted.links : [];
+        const repos = Array.isArray(extracted.repos) ? extracted.repos : [];
 
         if (dryRun) {
-          return json({ ok: true, dry_run: true, extracted: { facts_count: facts.length, decisions_count: decisions.length, states_count: states.length, concepts_count: concepts.length }, preview: extracted });
+          return json({ ok: true, dry_run: true, extracted: { facts_count: facts.length, decisions_count: decisions.length, states_count: states.length, concepts_count: concepts.length, rules_count: rules.length, links_count: links.length, repos_count: repos.length }, preview: extracted });
         }
 
         const _uid = (await identifyPin(request, env)) || "paddy";
-        let saved = { facts: 0, decisions: 0, states: 0, concepts: 0, errors: [] };
+        let saved = { facts: 0, decisions: 0, states: 0, concepts: 0, rules: 0, links: 0, repos: 0, errors: [] };
 
         // Save facts to memory_v2
         for (const f of facts) {
@@ -4102,7 +4108,50 @@ ${transcript.slice(0, 100000)}`;
           }
         }
 
-        return json({ ok: true, saved, totals: { facts: facts.length, decisions: decisions.length, states: states.length, concepts: concepts.length } });
+        // Save rules to memory_v2 with category=rule
+        for (const r of rules) {
+          try {
+            const proj = (r.project || defaultProject).toString().slice(0,60);
+            const key = "rule_" + (r.key || ("r_" + Date.now())).toString().slice(0,80);
+            const val = (r.value || "").toString().slice(0,2000);
+            if (!val) continue;
+            await env.DB.prepare("INSERT INTO memory_v2 (pin_user, project, key, value, version, is_current, is_shared, actor, created_at) VALUES (?, ?, ?, ?, 1, 1, 0, ?, ?)").bind(_uid, proj, key, val, "migrate-import-rule", Date.now()).run();
+            saved.rules++;
+          } catch(e) { saved.errors.push("rule: " + e.message); }
+        }
+        // Save links to memory_v2 with category=link AND attempt to update project_hub.live_url
+        for (const l of links) {
+          try {
+            const proj = (l.project || defaultProject).toString().slice(0,60);
+            const label = (l.label || "link").toString().slice(0,120);
+            const url = (l.url || "").toString().slice(0,500);
+            if (!url) continue;
+            const key = "link_" + label.toLowerCase().replace(/[^a-z0-9-]/g,'-').slice(0,60);
+            await env.DB.prepare("INSERT INTO memory_v2 (pin_user, project, key, value, version, is_current, is_shared, actor, created_at) VALUES (?, ?, ?, ?, 1, 1, 0, ?, ?)").bind(_uid, proj, key, label + ": " + url, "migrate-import-link", Date.now()).run();
+            saved.links++;
+            // If this looks like a live URL and project has none, set it
+            if (env.PROJECT_HUB && (label.toLowerCase().includes("live") || label.toLowerCase().includes("url") || label.toLowerCase().includes("home"))) {
+              const slug = proj.replace(/-/g,' ');
+              await env.PROJECT_HUB.prepare("UPDATE project_hub SET live_url = ? WHERE LOWER(REPLACE(project_name,' ','-')) = ? AND (live_url IS NULL OR live_url='')").bind(url, proj).run().catch(() => {});
+            }
+          } catch(e) { saved.errors.push("link: " + e.message); }
+        }
+        // Save repos: update project_hub.github_url; also save as memory
+        for (const r of repos) {
+          try {
+            const proj = (r.project || defaultProject).toString().slice(0,60);
+            const url = (r.repo_url || "").toString().slice(0,500);
+            const notes = (r.notes || "").toString().slice(0,500);
+            if (!url) continue;
+            await env.DB.prepare("INSERT INTO memory_v2 (pin_user, project, key, value, version, is_current, is_shared, actor, created_at) VALUES (?, ?, ?, ?, 1, 1, 0, ?, ?)").bind(_uid, proj, "repo_main", url + (notes ? " — " + notes : ""), "migrate-import-repo", Date.now()).run();
+            saved.repos++;
+            if (env.PROJECT_HUB) {
+              await env.PROJECT_HUB.prepare("UPDATE project_hub SET github_url = ? WHERE LOWER(REPLACE(project_name,' ','-')) = ? AND (github_url IS NULL OR github_url='')").bind(url, proj).run().catch(() => {});
+            }
+          } catch(e) { saved.errors.push("repo: " + e.message); }
+        }
+
+        return json({ ok: true, saved, totals: { facts: facts.length, decisions: decisions.length, states: states.length, concepts: concepts.length, rules: rules.length, links: links.length, repos: repos.length } });
       }
 
       // Project context — full record + recent events + live worker health + recent GH commits
