@@ -1116,9 +1116,6 @@ export class FalkorAgent {
             max_tokens: 2048,
           }),
         });
-        } finally {
-          clearInterval(_heartbeat);
-        }
         if (resp.ok) {
           const data = await resp.json();
           reply = data.reply || data.content || data.response || data.text || '';
