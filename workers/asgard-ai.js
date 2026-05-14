@@ -1,5 +1,5 @@
 // asgard-ai v5.8.0-stream: multi-provider (Anthropic/OpenAI/Groq) streaming SSE, normalized tokens
-const VERSION = '6.6.1';
+const VERSION = '6.7.0';
 const WORKER_NAME = "asgard-ai";
 
 // --- PIN auth helper (v1.1.0 security patch) ---
@@ -2372,6 +2372,47 @@ const AGENTIC_TOOLS_OPENAI = [
   }}
 ];
 
+function _buildProjectSystemPrefix(proj, events, health, commits) {
+  if (!proj) return '';
+  const lines = [];
+  lines.push('## ACTIVE PROJECT CONTEXT — Paddy is chatting about: ' + proj.project_name);
+  lines.push('Category: ' + (proj.category||'—') + ' · Status: ' + (proj.status||'—') + ' · Progress: ' + (proj.progress_pct||0) + '%');
+  if (proj.live_url) lines.push('Live URL: ' + proj.live_url);
+  if (proj.cloudflare_worker) lines.push('Cloudflare Worker: ' + proj.cloudflare_worker);
+  if (proj.cf_zone) lines.push('Cloudflare Zone: ' + proj.cf_zone);
+  if (proj.github_url) lines.push('GitHub: ' + proj.github_url);
+  if (proj.tech_stack) lines.push('Tech stack: ' + proj.tech_stack);
+  if (proj.description) lines.push('Description: ' + proj.description);
+  if (proj.next_action) lines.push('Next action: ' + proj.next_action);
+  if (proj.notes) lines.push('Notes: ' + String(proj.notes).slice(0,500));
+  if (commits && commits.length) {
+    lines.push('Recent commits:');
+    commits.forEach(c => lines.push('- ' + c.sha + ' (' + (c.date||'').slice(0,10) + ') ' + c.message));
+  }
+  if (events && events.length) {
+    lines.push('Recent events:');
+    events.slice(0,5).forEach(e => lines.push('- ' + (e.ts||'').slice(0,16) + ' ' + e.event + ': ' + (e.summary||'').slice(0,140)));
+  }
+  if (health) lines.push('Live /health: ' + JSON.stringify(health).slice(0,300));
+  if (proj.cloudflare_worker || proj.github_url) {
+    lines.push('## How to edit this project:');
+    if (proj.cloudflare_worker && proj.github_url) {
+      lines.push('1. Use github_get_file (' + proj.github_url + ') to read current code.');
+      lines.push('2. Use github_write_file to commit edits.');
+      lines.push('3. Use deploy_worker(name: "' + proj.cloudflare_worker + '") to push to Cloudflare.');
+      lines.push('4. Use http_request to verify the live URL.');
+    } else if (proj.cloudflare_worker) {
+      lines.push('1. Use get_worker_code(name: "' + proj.cloudflare_worker + '") to read.');
+      lines.push('2. Use deploy_worker to redeploy.');
+    } else if (proj.github_url) {
+      lines.push('1. Use github_get_file (' + proj.github_url + ') to read.');
+      lines.push('2. Use github_write_file to commit. CI auto-deploys.');
+    }
+  }
+  return lines.join('\n');
+}
+__name(_buildProjectSystemPrefix, "_buildProjectSystemPrefix");
+
 function _agSanitizeForGemini(schema) {
   if (!schema || typeof schema !== 'object') return schema;
   const clean = {};
@@ -3865,6 +3906,64 @@ export default {
           "SELECT id, project_name, category, status, progress_pct, live_url, last_updated, next_action, tech_stack, description, notes, domains, revenue_y1, revenue_y2, revenue_y3, income_priority, key_features, cost_monthly, detail_md, github_url, cloudflare_worker, cf_zone, concept_md, revenue_actual FROM project_hub ORDER BY income_priority ASC, sort_order ASC, id"
         ).all();
         return json({ ok: true, count: rs.results.length, projects: rs.results });
+      }
+      // Project context — full record + recent events + live worker health + recent GH commits
+      if (path === "/admin/project-context" && method === "GET") {
+        const _pr = await pinOk(request, env); if (_pr !== true) return pinRequired(_pr);
+        if (!env.PROJECT_HUB) return err("PROJECT_HUB D1 binding not set", 500);
+        const _url = new URL(request.url);
+        const _name = (_url.searchParams.get('name') || '').trim();
+        if (!_name) return err("name query param required", 400);
+        const proj = await env.PROJECT_HUB.prepare(
+          "SELECT * FROM project_hub WHERE LOWER(project_name) = LOWER(?) OR LOWER(id) = LOWER(?) LIMIT 1"
+        ).bind(_name, _name).first().catch(() => null);
+        if (!proj) return json({ ok: false, error: "project not found", name: _name }, 404);
+        let events = [];
+        try {
+          const rs = await env.DB.prepare(
+            "SELECT ts, event, summary, url, commit_sha, source FROM project_events WHERE LOWER(project) = LOWER(?) ORDER BY id DESC LIMIT 10"
+          ).bind(proj.project_name).all();
+          events = rs.results || [];
+        } catch(e) {}
+        let live_health = null;
+        const hUrl = proj.live_url ? (String(proj.live_url).replace(/\/+$/,'') + '/health') : (proj.cloudflare_worker ? ('https://' + proj.cloudflare_worker + '.luckdragon.io/health') : null);
+        if (hUrl) {
+          try {
+            const hr = await fetch(hUrl, { signal: AbortSignal.timeout(3000) });
+            if (hr.ok) live_health = await hr.json().catch(() => null);
+          } catch(e) {}
+        }
+        let recent_commits = [];
+        if (proj.github_url) {
+          try {
+            const m = String(proj.github_url).match(/github\.com\/([^\/]+)\/([^\/?#]+)/);
+            if (m) {
+              const owner = m[1];
+              const repo = m[2].replace(/\.git$/,'');
+              const gr = await fetch('https://api.github.com/repos/' + owner + '/' + repo + '/commits?per_page=5', {
+                headers: env.GITHUB_TOKEN ? { Authorization: 'Bearer ' + env.GITHUB_TOKEN, Accept: 'application/vnd.github+json' } : { Accept: 'application/vnd.github+json' },
+                signal: AbortSignal.timeout(5000)
+              });
+              if (gr.ok) {
+                const arr = await gr.json();
+                recent_commits = (arr || []).slice(0, 5).map(c => ({
+                  sha: (c.sha || '').slice(0,12),
+                  message: (c.commit && c.commit.message || '').split('\n')[0].slice(0,140),
+                  date: c.commit && c.commit.author && c.commit.author.date,
+                  author: c.commit && c.commit.author && c.commit.author.name
+                }));
+              }
+            }
+          } catch(e) {}
+        }
+        return json({
+          ok: true,
+          project: proj,
+          recent_events: events,
+          live_health: live_health,
+          recent_commits: recent_commits,
+          system_prefix: _buildProjectSystemPrefix(proj, events, live_health, recent_commits)
+        });
       }
       if (path === "/admin/projects/get" && method === "GET") {
         const _pr = await pinOk(request, env); if (_pr !== true) return pinRequired(_pr);
