@@ -730,7 +730,7 @@ export class FalkorAgent {
       const memory = await this.getMemory();
       const ctxTs = await this.state.storage.get('liveContextTs');
       return corsJson({
-        version: '2.20.2',
+        version: '2.21.0',
         activeSessions: this.sessions.size,
         historyLength: history.length,
         memoryKeys: Object.keys(memory).length,
@@ -754,7 +754,7 @@ export class FalkorAgent {
         const msg = JSON.parse(evt.data);
         if (msg.type === 'chat') {
           const userId = msg.userId || 'paddy';
-          const _resolvedModel = (!msg.model || msg.model==='auto') ? autoPickModel(msg.text, !!msg.system_prefix, msg.productContext) : msg.model; await this.processChat(msg.text, _resolvedModel, server, msg.productContext, userId, msg.system_prefix);
+          const _resolvedModel = (!msg.model || msg.model==='auto') ? autoPickModel(msg.text, !!msg.system_prefix, msg.productContext) : msg.model; await this.processChat(msg.text, _resolvedModel, server, msg.productContext, userId, msg.system_prefix, msg.convoMessages);
         } else if (msg.type === 'ping') {
           server.send(JSON.stringify({ type: 'pong' }));
         } else if (msg.type === 'history') {
@@ -827,7 +827,7 @@ export class FalkorAgent {
     return ctx;
   }
 
-  async processChat(text, model, ws, productContext, userId, systemPrefix) {
+  async processChat(text, model, ws, productContext, userId, systemPrefix, convoMessages) {
     const history = await this.getHistory();
     const memory = await this.getMemory();
     const pin = this.env.AGENT_PIN || '';
@@ -951,7 +951,8 @@ export class FalkorAgent {
       : '';
 
     // ── 5. Build system prompt with live context injected ────────────────────
-    const contextHistory = history.slice(-40).map(h => ({ role: h.role, content: h.content }));
+    // v2.21.0: prefer per-convo messages from client; only fall back to global history if no convo messages provided
+    const contextHistory = (Array.isArray(convoMessages) && convoMessages.length > 0) ? convoMessages.slice(-40).map(h => ({ role: h.role, content: h.content })).filter(m => m.role && m.content) : history.slice(-40).map(h => ({ role: h.role, content: h.content }));
 
     // Time-awareness context (AEST = UTC+10)
     const _nowAEST = new Date(Date.now() + 10 * 60 * 60 * 1000);
@@ -1281,7 +1282,7 @@ export default {
     }
 
     if (url.pathname === '/health') {
-      return Response.json({ status: 'ok', version: '2.20.2', worker: 'falkor-agent' });
+      return Response.json({ status: 'ok', version: '2.21.0', worker: 'falkor-agent' });
     }
 
     // ── /tasks proxy → falkor-workflows via service binding (no 522 loopback) ──
