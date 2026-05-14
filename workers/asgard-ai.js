@@ -1,5 +1,5 @@
 // asgard-ai v5.8.0-stream: multi-provider (Anthropic/OpenAI/Groq) streaming SSE, normalized tokens
-const VERSION = '6.9.0';
+const VERSION = '6.10.0';
 const WORKER_NAME = "asgard-ai";
 
 // --- PIN auth helper (v1.1.0 security patch) ---
@@ -2344,6 +2344,14 @@ const AGENTIC_TOOLS_OPENAI = [
   }},
   // New: create new Google Drive files (native Docs/Sheets/Slides/folders + plain)
   { type: "function", function: {
+    name: "merge_projects",
+    description: "Merge two project_hub entries. Source row's notes + detail_md + concept_md get appended to target's detail_md, then source.status is set to 'merged_into_<target_id>' so history is preserved (NOT deleted). Use when Paddy says 'merge project X into Y' or 'these two are duplicates'. Always confirm with Paddy before calling on production projects.",
+    parameters: { type: "object", properties: {
+      source_id: { type: "integer", description: "project_hub.id to absorb (will be marked merged_into_<target_id>)" },
+      target_id: { type: "integer", description: "project_hub.id that keeps the merged content" }
+    }, required: ["source_id","target_id"] }
+  }},
+  { type: "function", function: {
     name: "recall",
     description: "Search Paddy's stored memory (memory_v2 + memory) for facts and decisions matching a query. Use this when Paddy asks 'what did we say about X', 'remind me about Y', or you need stored context. Returns up to 10 matching memories with their key, value, project, and recency.",
     parameters: { type: "object", properties: {
@@ -3073,6 +3081,26 @@ async function agenticExecuteTool(name, input, env) {
       if (!r.ok) return { error: "drive_patch " + r.status, detail: (await r.text()).slice(0,300) };
       const data = await r.json();
       return { ok: true, file_id, size: new_content.length, name: data.name, modifiedTime: data.modifiedTime };
+    }
+    if (name === "merge_projects") {
+      const { source_id, target_id } = input || {};
+      if (!source_id || !target_id) return { error: "source_id and target_id required" };
+      if (source_id === target_id) return { error: "source and target must differ" };
+      if (!env.PROJECT_HUB) return { error: "PROJECT_HUB binding missing" };
+      try {
+        const src = await env.PROJECT_HUB.prepare("SELECT * FROM project_hub WHERE id = ?").bind(source_id).first();
+        const tgt = await env.PROJECT_HUB.prepare("SELECT * FROM project_hub WHERE id = ?").bind(target_id).first();
+        if (!src) return { error: "source id " + source_id + " not found" };
+        if (!tgt) return { error: "target id " + target_id + " not found" };
+        const header = "\n\n## Merged from \"" + src.project_name + "\" (was id " + source_id + ") \u2014 " + new Date().toISOString().slice(0,10);
+        const body = "\nNotes: " + (src.notes || "") + "\n\nDetail: " + (src.detail_md || "") + (src.concept_md ? "\n\nConcept: " + src.concept_md : "");
+        const newDetail = (tgt.detail_md || "") + header + body;
+        await env.PROJECT_HUB.prepare("UPDATE project_hub SET detail_md = ? WHERE id = ?").bind(newDetail, target_id).run();
+        await env.PROJECT_HUB.prepare("UPDATE project_hub SET status = ? WHERE id = ?").bind("merged_into_" + target_id, source_id).run();
+        return { ok: true, source: { id: source_id, name: src.project_name }, target: { id: target_id, name: tgt.project_name }, action: "merged" };
+      } catch(e) {
+        return { error: "merge_projects failed: " + e.message };
+      }
     }
     if (name === "recall") {
       const { query = '', project = '', limit = 10 } = input || {};
@@ -3962,7 +3990,7 @@ export default {
         if (!transcript || transcript.length < 50) return err("transcript required (min 50 chars)", 400);
         if (transcript.length > 200000) return err("transcript too large (max 200k chars)", 400);
         // Ask Haiku to extract structured info
-        const extractPrompt = `You are extracting structured information from a chat transcript so it can be saved into Paddy's Asgard knowledge base.
+        const extractPrompt = `You are extracting structured information from a CONTENT BLOB (could be a chat, a spec, notes, a doc, a project plan, anything) so it can be saved into Paddy's Asgard knowledge base. Read whatever's there and pull out the durable signal.
 
 Read the transcript below and return a JSON object with these arrays:
 - "facts": durable facts about Paddy / his projects / his world. Each fact: { project: slug-string-or-global, key: short-slug, value: "the fact, 1-2 sentences", category: "preference"|"identity"|"decision"|"technical"|"family"|"work"|"misc" }
