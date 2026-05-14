@@ -1,5 +1,5 @@
 // asgard-ai v5.8.0-stream: multi-provider (Anthropic/OpenAI/Groq) streaming SSE, normalized tokens
-const VERSION = '6.8.0';
+const VERSION = '6.9.0';
 const WORKER_NAME = "asgard-ai";
 
 // --- PIN auth helper (v1.1.0 security patch) ---
@@ -3952,6 +3952,131 @@ export default {
         ).all();
         return json({ ok: true, count: rs.results.length, projects: rs.results });
       }
+      // Migrate-from-Claude — paste in a transcript, extract structured memory
+      if (path === "/admin/migrate-chat" && method === "POST") {
+        const _pr = await pinOk(request, env); if (_pr !== true) return pinRequired(_pr);
+        const body = await request.json().catch(() => ({}));
+        const transcript = (body.transcript || "").toString();
+        const defaultProject = body.default_project || "global";
+        const dryRun = !!body.dry_run;
+        if (!transcript || transcript.length < 50) return err("transcript required (min 50 chars)", 400);
+        if (transcript.length > 200000) return err("transcript too large (max 200k chars)", 400);
+        // Ask Haiku to extract structured info
+        const extractPrompt = `You are extracting structured information from a chat transcript so it can be saved into Paddy's Asgard knowledge base.
+
+Read the transcript below and return a JSON object with these arrays:
+- "facts": durable facts about Paddy / his projects / his world. Each fact: { project: slug-string-or-global, key: short-slug, value: "the fact, 1-2 sentences", category: "preference"|"identity"|"decision"|"technical"|"family"|"work"|"misc" }
+- "decisions": project decisions made. Each: { project: slug, event: short-slug, summary: "what was decided, 1-2 sentences" }
+- "state_updates": where each project is up to. Each: { project: slug, next_action: "what's next, 1 sentence", notes: "current state, short" }
+- "concepts": high-level vision / plan for a project. Each: { project: slug, concept_md: "1-3 paragraphs of vision/plan in markdown" }
+
+Project slugs (use exact strings): asgard-final-build, falkor-chat-pwa, kbt, sportcarnival, save-my-seat, school-sport-portal, lessonlab, super-league, family-footy-tipping, personal-finance, my-betting-hq, long-range-tipping, horse-race-tipping, ideas, global (for facts not project-specific).
+
+Return ONLY valid JSON. No prose. No code fences. Just {...}.
+
+TRANSCRIPT:
+${transcript.slice(0, 100000)}`;
+
+        const llmRes = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: {
+            "x-api-key": env.ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            model: "claude-haiku-4-5-20251001",
+            max_tokens: 4096,
+            messages: [{ role: "user", content: extractPrompt }]
+          })
+        });
+        if (!llmRes.ok) {
+          const t = await llmRes.text();
+          return err("extract LLM call failed " + llmRes.status + ": " + t.slice(0,300), 502);
+        }
+        const llmData = await llmRes.json();
+        const text = ((llmData.content || [{}])[0] || {}).text || "";
+        // Strip code fences if any
+        let jsonStr = text.replace(/^```(?:json)?\s*/m, "").replace(/\s*```\s*$/m, "").trim();
+        // Find first { ... last }
+        const a = jsonStr.indexOf("{"), z = jsonStr.lastIndexOf("}");
+        if (a >= 0 && z > a) jsonStr = jsonStr.slice(a, z + 1);
+        let extracted;
+        try { extracted = JSON.parse(jsonStr); }
+        catch(e) { return json({ ok: false, error: "could not parse extracted JSON", raw_first_500: text.slice(0,500) }, 500); }
+
+        const facts = Array.isArray(extracted.facts) ? extracted.facts : [];
+        const decisions = Array.isArray(extracted.decisions) ? extracted.decisions : [];
+        const states = Array.isArray(extracted.state_updates) ? extracted.state_updates : [];
+        const concepts = Array.isArray(extracted.concepts) ? extracted.concepts : [];
+
+        if (dryRun) {
+          return json({ ok: true, dry_run: true, extracted: { facts_count: facts.length, decisions_count: decisions.length, states_count: states.length, concepts_count: concepts.length }, preview: extracted });
+        }
+
+        const _uid = (await identifyPin(request, env)) || "paddy";
+        let saved = { facts: 0, decisions: 0, states: 0, concepts: 0, errors: [] };
+
+        // Save facts to memory_v2
+        for (const f of facts) {
+          try {
+            const proj = (f.project || defaultProject).toString().slice(0,60);
+            const key = (f.key || "fact_" + Date.now()).toString().slice(0,80);
+            const val = (f.value || "").toString().slice(0,2000);
+            if (!val) continue;
+            await env.DB.prepare("INSERT INTO memory_v2 (pin_user, project, key, value, version, is_current, is_shared, actor, created_at) VALUES (?, ?, ?, ?, 1, 1, 0, ?, ?)").bind(_uid, proj, key, val, "migrate-from-claude", Date.now()).run();
+            saved.facts++;
+          } catch(e) { saved.errors.push("fact: " + e.message); }
+        }
+
+        // Save decisions to project_events
+        for (const d of decisions) {
+          try {
+            const proj = (d.project || defaultProject).toString().slice(0,60);
+            const ev = (d.event || "decision").toString().slice(0,80);
+            const summary = (d.summary || "").toString().slice(0,2000);
+            if (!summary) continue;
+            await env.DB.prepare("INSERT INTO project_events (project, event, summary, source, uid) VALUES (?, ?, ?, ?, ?)").bind(proj, ev, summary, "migrate-from-claude", _uid).run();
+            saved.decisions++;
+          } catch(e) { saved.errors.push("decision: " + e.message); }
+        }
+
+        // Update project_hub next_action + notes (only if PROJECT_HUB binding present)
+        if (env.PROJECT_HUB) {
+          for (const s of states) {
+            try {
+              const slug = (s.project || "").toString().toLowerCase().replace(/[^a-z0-9-]/g,'-');
+              if (!slug) continue;
+              const next = (s.next_action || "").toString().slice(0,2000);
+              const notes = (s.notes || "").toString().slice(0,3000);
+              // Try to match by slug or project_name like-pattern
+              const match = await env.PROJECT_HUB.prepare("SELECT id, project_name, notes FROM project_hub WHERE LOWER(REPLACE(project_name,' ','-')) = ? OR LOWER(project_name) LIKE ? LIMIT 1").bind(slug, '%' + slug.replace(/-/g,' ') + '%').first().catch(() => null);
+              if (match) {
+                const newNotes = (match.notes ? match.notes + "\n\n" : "") + "[migrate-from-claude " + new Date().toISOString().slice(0,10) + "] " + notes;
+                await env.PROJECT_HUB.prepare("UPDATE project_hub SET next_action = COALESCE(?, next_action), notes = ? WHERE id = ?").bind(next || null, newNotes, match.id).run();
+                saved.states++;
+              }
+            } catch(e) { saved.errors.push("state: " + e.message); }
+          }
+          for (const c of concepts) {
+            try {
+              const slug = (c.project || "").toString().toLowerCase().replace(/[^a-z0-9-]/g,'-');
+              if (!slug) continue;
+              const md = (c.concept_md || "").toString().slice(0,8000);
+              if (!md) continue;
+              const match = await env.PROJECT_HUB.prepare("SELECT id, concept_md FROM project_hub WHERE LOWER(REPLACE(project_name,' ','-')) = ? OR LOWER(project_name) LIKE ? LIMIT 1").bind(slug, '%' + slug.replace(/-/g,' ') + '%').first().catch(() => null);
+              if (match) {
+                const newConcept = (match.concept_md ? match.concept_md + "\n\n---\n\n" : "") + "[migrate-from-claude " + new Date().toISOString().slice(0,10) + "]\n" + md;
+                await env.PROJECT_HUB.prepare("UPDATE project_hub SET concept_md = ? WHERE id = ?").bind(newConcept, match.id).run();
+                saved.concepts++;
+              }
+            } catch(e) { saved.errors.push("concept: " + e.message); }
+          }
+        }
+
+        return json({ ok: true, saved, totals: { facts: facts.length, decisions: decisions.length, states: states.length, concepts: concepts.length } });
+      }
+
       // Project context — full record + recent events + live worker health + recent GH commits
       if (path === "/admin/project-context" && method === "GET") {
         const _pr = await pinOk(request, env); if (_pr !== true) return pinRequired(_pr);
