@@ -646,7 +646,7 @@ export class FalkorAgent {
       const memory = await this.getMemory();
       const ctxTs = await this.state.storage.get('liveContextTs');
       return corsJson({
-        version: '2.14.1',
+        version: '2.15.0',
         activeSessions: this.sessions.size,
         historyLength: history.length,
         memoryKeys: Object.keys(memory).length,
@@ -915,6 +915,7 @@ export class FalkorAgent {
       ``,
       `## Engineering rules (ALL projects, non-negotiable):`,
       `- Root-cause before patching. Read the surrounding code and any nearby comment. If code looks like a workaround, identify what it's masking. Don't remove a workaround until the underlying bug is proven gone.`,
+      `- NEVER claim a worker is down, broken, slow, looping, or in a bad state without proof. Before saying anything is broken, call http_request to its /health URL OR get_worker_code(name) OR check project_events. If you don't have evidence in this turn, say 'I haven't checked — want me to?' instead of inventing an incident. Do not propose 'redeploy from last known good state' unless a tool call in THIS turn returned non-200. Hallucinated incidents cause real reverts and waste hours.`,
       `- Verify the EFFECT of every deploy, not the 200 status. Fetch served output. Run the product's checks.py.`,
       `- Every product has a checks.py at the repo root. Run it post-deploy. Add a check whenever a new bug class is found.`,
       `- Single source of truth for version: const VERSION at top of worker, every other place reads from it.`,
@@ -1095,7 +1096,7 @@ export default {
     }
 
     if (url.pathname === '/health') {
-      return Response.json({ status: 'ok', version: '2.14.1', worker: 'falkor-agent' });
+      return Response.json({ status: 'ok', version: '2.15.0', worker: 'falkor-agent' });
     }
 
     // ── /tasks proxy → falkor-workflows via service binding (no 522 loopback) ──
