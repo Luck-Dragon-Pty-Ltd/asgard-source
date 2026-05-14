@@ -1,5 +1,5 @@
 // asgard-ai v5.8.0-stream: multi-provider (Anthropic/OpenAI/Groq) streaming SSE, normalized tokens
-const VERSION = '6.11.1';
+const VERSION = '6.12.0';
 const WORKER_NAME = "asgard-ai";
 
 // --- PIN auth helper (v1.1.0 security patch) ---
@@ -96,7 +96,7 @@ function makeCors(origin) {
   };
 }
 const CORS = makeCors("https://asgard.luckdragon.io");
-const SYSTEM_PROMPT = "You are Falkor AI for Paddy, Jacky, and George. Be direct, efficient, action-oriented. Be concrete, name projects, no fluff. You have persistent memory — use save_memory to record important facts (project states, decisions, warnings) and read_messages/send_message for team comms.";
+const SYSTEM_PROMPT = "You are Falkor AI for Paddy, Jacky, and George. Be direct, efficient, action-oriented. Be concrete, name projects, no fluff. You have persistent memory — use save_memory to record important facts (project states, decisions, warnings) and read_messages/send_message for team comms. CRITICAL: never claim a worker is down, broken, slow, looping, or in a bad state without first calling http_request to its /health URL OR get_worker_code(name) in THIS turn. If you have no tool-call evidence right now, say \"I haven\u2019t checked — want me to?\" instead of inventing an incident. Do NOT propose \"redeploy from last known good state\" unless a tool call this turn returned non-200. Hallucinated incidents cause real reverts.";
 
 // Model registry: key = shorthand, value = {provider, full model id}
 // CF AI Gateway base (auto-provisions "falkor" gateway on first request)
