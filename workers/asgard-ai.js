@@ -1,5 +1,5 @@
 // asgard-ai v5.8.0-stream: multi-provider (Anthropic/OpenAI/Groq) streaming SSE, normalized tokens
-const VERSION = '6.14.0';
+const VERSION = '6.14.1';
 const WORKER_NAME = "asgard-ai";
 
 // --- PIN auth helper (v1.1.0 security patch) ---
@@ -2533,7 +2533,7 @@ async function agenticExecuteTool(name, input, env) {
             body: text.substring(0, 1000)
           };
         }
-        return { status: r.status, ok: r.ok, body: text.substring(0, 20000) };
+        return { status: r.status, ok: r.ok, body: text.substring(0, 8000) };
       } catch (e) {
         return { status: 0, ok: false, error: e.message, loopback_suspected: isLoopback };
       }
@@ -3289,7 +3289,7 @@ async function handleChatAgentic(request, env) {
         try { args = JSON.parse(tc.function.arguments || "{}"); } catch (e) { args = { _parse_error: e.message }; }
         const result = await agenticExecuteTool(tc.function.name, args, env);
         toolsExecuted.push({ tool: tc.function.name, input: args, result });
-        oaiMessages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(result).substring(0, 20000) });
+        oaiMessages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(result).substring(0, 8000) });
       }
     }
   } else if (provider === "gemini") {
@@ -3372,7 +3372,7 @@ async function handleChatAgentic(request, env) {
         if (block.type !== "tool_use") continue;
         const result = await agenticExecuteTool(block.name, block.input, env);
         toolsExecuted.push({ tool: block.name, input: block.input, result });
-        toolResults.push({ type: "tool_result", tool_use_id: block.id, content: JSON.stringify(result).substring(0, 20000) });
+        toolResults.push({ type: "tool_result", tool_use_id: block.id, content: JSON.stringify(result).substring(0, 8000) });
       }
       claudeReq.messages = [...claudeReq.messages, { role: "assistant", content: d.content }, { role: "user", content: toolResults }];
     }
@@ -3415,7 +3415,7 @@ async function handleChatAgentic(request, env) {
         try { args = JSON.parse(tc.function.arguments || "{}"); } catch (e) { args = { _parse_error: e.message }; }
         const result = await agenticExecuteTool(tc.function.name, args, env);
         toolsExecuted.push({ tool: tc.function.name, input: args, result });
-        groqMessages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(result).substring(0, 20000) });
+        groqMessages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(result).substring(0, 8000) });
       }
     }
   } else {
