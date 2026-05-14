@@ -591,6 +591,23 @@ async function maybeExtractMemory(history, userId, pin, aiPin, aiUrl) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ── v2.20.0 — model auto-router ─────────────────────────────────────────
+function autoPickModel(text, hasSystemPrefix, productContext) {
+  if (!text) return 'haiku';
+  const t = String(text);
+  const lower = t.toLowerCase();
+  // Very short / casual → fast cheap model
+  if (t.length < 50 && !/code|debug|why|how|fix|deploy|explain/i.test(t)) return 'groq-fast';
+  // Code / engineering signals → sonnet (best agentic + tool use)
+  if (/\bcode\b|\bdebug\b|\brefactor\b|\bfix\b|\bdeploy\b|\bworker\b|\bschema\b|\bd1\b|\bsql\b|\bbug\b|\berror\b|\bstack trace\b|```/i.test(lower)) return 'sonnet';
+  // Hard reasoning signals → sonnet
+  if (/explain|analyze|why does|root cause|tradeoff|architecture|design/i.test(lower) && t.length > 80) return 'sonnet';
+  // Project-context chats → sonnet (better at long-context reasoning over project state)
+  if (hasSystemPrefix) return 'sonnet';
+  // Default for everything else: haiku (fast + cheap + capable)
+  return 'haiku';
+}
+
 // ── v2.17.0 — anti-hallucination safety net (server-side) ──────────────────
 const FORBIDDEN_PHRASES = [
   // exact phrases (legacy)
@@ -678,7 +695,7 @@ export class FalkorAgent {
       const { model, productContext } = body;
       const text = body.text || body.message || '';
       const userId = request.headers.get('X-User-Id') || body.userId || 'paddy';
-      const reply = await this.processChat(text, model || 'groq-fast', null, productContext, userId);
+      const _rm = (!model || model==='auto') ? autoPickModel(text, false, productContext) : model; const reply = await this.processChat(text, _rm, null, productContext, userId);
       return corsJson({ reply });
     }
 
@@ -712,7 +729,7 @@ export class FalkorAgent {
       const memory = await this.getMemory();
       const ctxTs = await this.state.storage.get('liveContextTs');
       return corsJson({
-        version: '2.19.0',
+        version: '2.20.0',
         activeSessions: this.sessions.size,
         historyLength: history.length,
         memoryKeys: Object.keys(memory).length,
@@ -736,7 +753,7 @@ export class FalkorAgent {
         const msg = JSON.parse(evt.data);
         if (msg.type === 'chat') {
           const userId = msg.userId || 'paddy';
-          await this.processChat(msg.text, msg.model || 'groq-fast', server, msg.productContext, userId, msg.system_prefix);
+          const _resolvedModel = (!msg.model || msg.model==='auto') ? autoPickModel(msg.text, !!msg.system_prefix, msg.productContext) : msg.model; await this.processChat(msg.text, _resolvedModel, server, msg.productContext, userId, msg.system_prefix);
         } else if (msg.type === 'ping') {
           server.send(JSON.stringify({ type: 'pong' }));
         } else if (msg.type === 'history') {
@@ -1218,7 +1235,7 @@ export default {
     }
 
     if (url.pathname === '/health') {
-      return Response.json({ status: 'ok', version: '2.19.0', worker: 'falkor-agent' });
+      return Response.json({ status: 'ok', version: '2.20.0', worker: 'falkor-agent' });
     }
 
     // ── /tasks proxy → falkor-workflows via service binding (no 522 loopback) ──
