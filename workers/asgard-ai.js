@@ -1,5 +1,5 @@
 // asgard-ai v5.8.0-stream: multi-provider (Anthropic/OpenAI/Groq) streaming SSE, normalized tokens
-const VERSION = '6.11.0';
+const VERSION = '6.11.1';
 const WORKER_NAME = "asgard-ai";
 
 // --- PIN auth helper (v1.1.0 security patch) ---
@@ -4017,7 +4017,7 @@ ${transcript.slice(0, 100000)}`;
           },
           body: JSON.stringify({
             model: "claude-haiku-4-5-20251001",
-            max_tokens: 4096,
+            max_tokens: 8192,
             messages: [{ role: "user", content: extractPrompt }]
           })
         });
