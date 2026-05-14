@@ -730,7 +730,7 @@ export class FalkorAgent {
       const memory = await this.getMemory();
       const ctxTs = await this.state.storage.get('liveContextTs');
       return corsJson({
-        version: '2.21.0',
+        version: '2.22.0',
         activeSessions: this.sessions.size,
         historyLength: history.length,
         memoryKeys: Object.keys(memory).length,
@@ -1071,17 +1071,25 @@ export class FalkorAgent {
         }, 25000);
         let resp;
         try {
-          resp = await fetch(`${aiUrl}/chat/agentic`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Pin': aiPin },
-          body: JSON.stringify({
-            message: text,
-            messages: contextHistory,
-            system: systemPrompt,
-            model,
-            max_tokens: 2048,
-          }),
-        });
+          // v2.22.0: fast path for project Q&A — when systemPrefix set AND no action verbs, use /chat/smart (no tools, no 8-tool agentic loop)
+          const _actionVerbs = /\b(deploy|edit|remove|fix|add|change|update|build|create|delete|migrate|refactor|push|commit|run|execute)\b/i;
+          const _useFastPath = systemPrefix && !_actionVerbs.test(text);
+          const _endpoint = _useFastPath ? '/chat/smart' : '/chat/agentic';
+          if (_useFastPath) {
+            this.broadcast({ type: 'tool_status', msgId, text: 'Falkor is answering from project context...' });
+          }
+          resp = await fetch(`${aiUrl}${_endpoint}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Pin': aiPin },
+            body: JSON.stringify({
+              message: text,
+              messages: contextHistory,
+              context: contextHistory,
+              system: systemPrompt,
+              model,
+              max_tokens: 2048,
+            }),
+          });
         } finally {
           clearInterval(_heartbeat);
         }
@@ -1282,7 +1290,7 @@ export default {
     }
 
     if (url.pathname === '/health') {
-      return Response.json({ status: 'ok', version: '2.21.0', worker: 'falkor-agent' });
+      return Response.json({ status: 'ok', version: '2.22.0', worker: 'falkor-agent' });
     }
 
     // ── /tasks proxy → falkor-workflows via service binding (no 522 loopback) ──
