@@ -646,7 +646,7 @@ export class FalkorAgent {
       const memory = await this.getMemory();
       const ctxTs = await this.state.storage.get('liveContextTs');
       return corsJson({
-        version: '2.12.0',
+        version: '2.13.0',
         activeSessions: this.sessions.size,
         historyLength: history.length,
         memoryKeys: Object.keys(memory).length,
@@ -889,6 +889,26 @@ export class FalkorAgent {
       `- No emojis. Plain text only — no symbols, icons, or emoji in any reply.`,
       `- Match energy: short question → short answer. Complex task → structured reply.`,
       `- Web search results in context (## Web Search Results)? Use them. Never say you can't search.`,
+      `## Asgard ecosystem — where to make changes (infer from request, don't ask):`,
+      `| If user wants… | Edit this worker | Repo path |`,
+      `|---|---|---|`,
+      `| Chat UI, message bubbles, sidebar, model picker, Settings panel, mascot, anything visible in the PWA | falkor-ui | asgard-source/workers/falkor-ui.js |`,
+      `| New agentic tool (Drive, GitHub, Slack, etc), LLM provider behaviour, /chat/* endpoints, /image/*, /memory, vision, vault tool access | asgard-ai | asgard-source/workers/asgard-ai.js |`,
+      `| Chat routing logic, system prompt, voice (STT/TTS), WebSocket session, multi-pin auth | falkor-agent | asgard-source/workers/falkor-agent.js |`,
+      `| Crons, daily handover, asgard-ai watchdog, smart alerts | falkor-workflows | asgard-source/workers/falkor-workflows.js |`,
+      `| Self-heal monitor, smoke tests, /health probes | falkor-code | asgard-source/workers/falkor-code.js |`,
+      `| Secret storage, PINs, OAuth tokens | asgard-vault | asgard-source/workers/asgard-vault.js |`,
+      `| Sport results, AFL/NRL ladder, racing | falkor-sport | asgard-source/workers/falkor-sport.js |`,
+      `| Calendar | falkor-calendar | asgard-source/workers/falkor-calendar.js |`,
+      `| Push notifications | falkor-push | asgard-source/workers/falkor-push.js |`,
+      `| Vector memory recall | falkor-brain | asgard-source/workers/falkor-brain.js |`,
+      `| KBT trivia | falkor-kbt | asgard-source/workers/falkor-kbt.js |`,
+      `| Project data, project_hub D1 row edits | asgard-ai (which owns PROJECT_HUB binding) | asgard-source/workers/asgard-ai.js |`,
+      `| Handover docs, asgard.md, SESSION-HANDOVER.md | (no worker — just commit to) asgard-handovers repo |`,
+      ``,
+      `When ${userCtx.name} says 'fix this' or 'add that' without naming a worker, infer which one from this map and act. If genuinely ambiguous, ask ONE short clarifying question, not three.`,
+      `Discipline that ends the revert loop: 1) commit to GitHub asgard-source FIRST, 2) deploy_worker with --content endpoint, 3) for asgard-ai only, update vault ASGARD_AI_CANONICAL_DEPLOY_ID + ASGARD_AI_CANONICAL_SIZE.`,
+      ``,
       `## Engineering rules (ALL projects, non-negotiable):`,
       `- Root-cause before patching. Read the surrounding code and any nearby comment. If code looks like a workaround, identify what it's masking. Don't remove a workaround until the underlying bug is proven gone.`,
       `- Verify the EFFECT of every deploy, not the 200 status. Fetch served output. Run the product's checks.py.`,
@@ -1051,7 +1071,7 @@ export default {
     }
 
     if (url.pathname === '/health') {
-      return Response.json({ status: 'ok', version: '2.12.0', worker: 'falkor-agent' });
+      return Response.json({ status: 'ok', version: '2.13.0', worker: 'falkor-agent' });
     }
 
     // ── /tasks proxy → falkor-workflows via service binding (no 522 loopback) ──
