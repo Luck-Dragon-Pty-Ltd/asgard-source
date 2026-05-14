@@ -646,7 +646,7 @@ export class FalkorAgent {
       const memory = await this.getMemory();
       const ctxTs = await this.state.storage.get('liveContextTs');
       return corsJson({
-        version: '2.13.0',
+        version: '2.14.0',
         activeSessions: this.sessions.size,
         historyLength: history.length,
         memoryKeys: Object.keys(memory).length,
@@ -878,6 +878,7 @@ export class FalkorAgent {
       _stateContext,
       `## Personality rules (non-negotiable):`,
       `- SHORT by default. 1–3 sentences unless the task genuinely demands more. Never pad.`,
+      `- PLAIN ENGLISH. Talk like a smart friend, not a developer. NO jargon by default. Don't say "commit SHA", say "the change is in". Don't say "worker", say "the app" or "the chat". Don't say "endpoint" or "binding" — say "the thing that does X". Don't paste raw IDs or hex strings unless asked. Don't say "asgard-ai" or "falkor-ui" — say "the brain" or "the chat app" or whatever the user understands. If you must reference a technical thing, name it but explain it in the same sentence. Paddy knows what he wants, not what each worker is called.`,
       `- No openers. Never start with "Certainly", "Great question", "Of course", "Sure", "Absolutely", "Happy to help", or any variant.`,
       `- Never start a reply with the word "I".`,
       `- Use ${userCtx.name}'s name once per reply — not every sentence.`,
@@ -947,7 +948,7 @@ export class FalkorAgent {
     if (ws) {
       // ── Agentic path: full response with tool use; broadcast tool events + final reply ──
       try {
-        this.broadcast({ type: 'token', msgId, text: '…' });
+        this.broadcast({ type: 'token', msgId, text: '' });
         const resp = await fetch(`${aiUrl}/chat/agentic`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Pin': aiPin },
@@ -964,7 +965,27 @@ export class FalkorAgent {
           reply = data.reply || data.content || data.response || data.text || '';
           if (Array.isArray(data.tools_executed) && data.tools_executed.length > 0) {
             for (const t of data.tools_executed) {
-              this.broadcast({ type: 'tool', msgId, tool: typeof t === 'string' ? t : (t.tool || t.name || JSON.stringify(t)) });
+              const _toolName = typeof t === 'string' ? t : (t.tool || t.name || 'tool');
+              const _toolHuman = ({
+                'get_worker_code': 'reading the code',
+                'github_get_file': 'reading the file',
+                'github_write_file': 'writing the change',
+                'deploy_worker': 'deploying',
+                'http_request': 'checking something',
+                'drive_create_file': 'creating a file',
+                'drive_search': 'searching Drive',
+                'drive_read': 'reading from Drive',
+                'drive_upload': 'uploading to Drive',
+                'docs_replace_text': 'editing the doc',
+                'docs_append_text': 'adding to the doc',
+                'sheets_write_values': 'filling in the sheet',
+                'slides_batch_update': 'editing the slides',
+                'send_email': 'sending the email',
+                'save_memory': 'remembering that',
+                'forget_memory': 'forgetting that',
+                'get_secret': 'looking up a secret',
+              })[_toolName] || ('using ' + _toolName);
+              this.broadcast({ type: 'tool', msgId, tool: _toolName, human: _toolHuman });
             }
           }
           this.broadcast({ type: 'token', msgId, text: reply });
@@ -1071,7 +1092,7 @@ export default {
     }
 
     if (url.pathname === '/health') {
-      return Response.json({ status: 'ok', version: '2.13.0', worker: 'falkor-agent' });
+      return Response.json({ status: 'ok', version: '2.14.0', worker: 'falkor-agent' });
     }
 
     // ── /tasks proxy → falkor-workflows via service binding (no 522 loopback) ──
