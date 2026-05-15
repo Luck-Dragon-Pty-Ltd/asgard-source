@@ -246,14 +246,14 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .bell-btn.active{color:var(--accent2)}
 
 /* ── Messages ── */
-.messages{flex:1;overflow-y:auto;padding:20px 16px;display:flex;flex-direction:column;gap:6px;min-width:0;overflow-x:hidden}
-.msg-row{display:flex;flex-direction:column;gap:3px;max-width:840px;width:100%;min-width:0}
+.messages{flex:1;overflow-y:auto;padding:20px 12px;display:flex;flex-direction:column;gap:6px;min-width:0;overflow-x:hidden;width:100%}
+.msg-row{display:flex;flex-direction:column;gap:3px;max-width:840px;width:100%;min-width:0;box-sizing:border-box}
 .msg-row.user{align-self:flex-end;align-items:flex-end}
 .msg-row.assistant{align-self:flex-start;align-items:flex-start}
 .msg-role{font-size:11px;color:var(--muted);padding:0 4px;font-weight:500}
-.msg-bubble{padding:11px 15px;border-radius:14px;font-size:14px;line-height:1.65;word-break:break-word;position:relative;max-width:min(720px,100%);overflow-wrap:break-word;word-break:break-word;box-sizing:border-box}
-.msg-row.user .msg-bubble{background:var(--user-bubble);border-bottom-right-radius:4px;max-width:min(420px,100%);overflow-wrap:anywhere}
-.msg-row.assistant .msg-bubble{background:var(--ai-bubble);border:1px solid var(--border);border-bottom-left-radius:4px;max-width:min(680px,100%);overflow-wrap:anywhere}
+.msg-bubble{padding:10px 13px;border-radius:14px;font-size:14px;line-height:1.65;position:relative;max-width:min(720px,92vw);overflow-wrap:anywhere;word-break:break-word;box-sizing:border-box;min-width:0}
+.msg-row.user .msg-bubble{background:var(--user-bubble);border-bottom-right-radius:4px;max-width:min(420px,88vw);overflow-wrap:anywhere}
+.msg-row.assistant .msg-bubble{background:var(--ai-bubble);border:1px solid var(--border);border-bottom-left-radius:4px;max-width:min(680px,92vw);overflow-wrap:anywhere}
 .msg-bubble pre{background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:12px;margin:8px 0;overflow-x:auto;font-size:13px;position:relative}
 .msg-bubble code{background:var(--panel2);padding:1px 5px;border-radius:4px;font-size:13px;font-family:'Fira Code',monospace}
 .msg-bubble pre code{background:none;padding:0;border-radius:0}
