@@ -1,5 +1,5 @@
 // asgard-ai v5.8.0-stream: multi-provider (Anthropic/OpenAI/Groq) streaming SSE, normalized tokens
-const VERSION = '6.16.2';
+const VERSION = '6.17.0';
 const WORKER_NAME = "asgard-ai";
 
 // --- PIN auth helper (v1.1.0 security patch) ---
@@ -186,8 +186,14 @@ function quickRoute(message) {
 // ---------- Provider adapters ----------
 async function callAnthropic(env, { model, messages, system, max_tokens = 1024, tools, stream = false }) {
   if (!env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY missing");
-  const body = { model, max_tokens, system: system || SYSTEM_PROMPT, messages };
-  if (tools && tools.length) body.tools = tools;
+  // v6.17: prompt caching — wrap system text in array form with cache_control
+  const _sysText = system || SYSTEM_PROMPT;
+  const _sysArr = _sysText.length > 1024 ? [{ type: "text", text: _sysText, cache_control: { type: "ephemeral" } }] : _sysText;
+  const body = { model, max_tokens, system: _sysArr, messages };
+  if (tools && tools.length) {
+    // Cache last tool to cache the entire tool list
+    body.tools = tools.map(function(t,i){ return i===tools.length-1 ? Object.assign({}, t, { cache_control: { type: "ephemeral" } }) : t; });
+  }
   if (stream) body.stream = true;
   return fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -2393,6 +2399,28 @@ const AGENTIC_TOOLS_OPENAI = [
       requests: { type: "array", description: "Slides batchUpdate requests array per Slides API spec", items: { type: "object" } }
     }, required: ["presentation_id","requests"] }
   }}
+  ,{ type: "function", function: {
+    name: "web_search",
+    description: "Search the web in real time using Tavily. Returns a list of result snippets (title, url, content). Use for current events, recent news, or any info not in your training data.",
+    parameters: { type: "object", properties: {
+      query: { type: "string", description: "What to search for" },
+      max_results: { type: "number", description: "Number of results to return (default 5)" }
+    }, required: ["query"] }
+  }},
+  { type: "function", function: {
+    name: "browse_url",
+    description: "Fetch a fully-rendered web page using Cloudflare Browser Rendering. Returns the rendered HTML/text. Use for JS-heavy sites where http_request returns empty content.",
+    parameters: { type: "object", properties: {
+      url: { type: "string", description: "URL to fetch" }
+    }, required: ["url"] }
+  }},
+  { type: "function", function: {
+    name: "pdf_extract",
+    description: "Extract plain text from a PDF URL. Use when a user shares a PDF link or stored file.",
+    parameters: { type: "object", properties: {
+      url: { type: "string", description: "URL of the PDF" }
+    }, required: ["url"] }
+  }}
 ];
 
 function _buildProjectSystemPrefix(proj, events, health, commits) {
@@ -2518,6 +2546,61 @@ async function _aiLogError(env, endpoint, message, detail) {
 }
 
 async function agenticExecuteTool(name, input, env) {
+  // v6.17: new tools
+  if (name === "web_search") {
+    if (!env.TAVILY_API_KEY) return { ok: false, error: "TAVILY_API_KEY missing" };
+    try {
+      const tr = await fetch("https://api.tavily.com/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: env.TAVILY_API_KEY, query: input.query, max_results: input.max_results || 5, search_depth: "basic" })
+      });
+      if (!tr.ok) return { ok: false, error: "tavily " + tr.status + ": " + (await tr.text()).slice(0,200) };
+      const td = await tr.json();
+      const results = (td.results || []).map(r => ({ title: r.title, url: r.url, content: (r.content||"").slice(0,500) }));
+      return { ok: true, query: input.query, results, answer: td.answer || "" };
+    } catch(e) { return { ok: false, error: String(e.message || e) }; }
+  }
+  if (name === "browse_url") {
+    if (!env.CF_API_TOKEN_FULLOPS && !env.CF_API_TOKEN) return { ok: false, error: "CF API token missing for browser rendering" };
+    const tok = env.CF_API_TOKEN_FULLOPS || env.CF_API_TOKEN;
+    const acct = env.CF_ACCOUNT_ID;
+    if (!acct) return { ok: false, error: "CF_ACCOUNT_ID missing" };
+    try {
+      const br = await fetch(`https://api.cloudflare.com/client/v4/accounts/${acct}/browser-rendering/content`, {
+        method: "POST",
+        headers: { "Authorization": "Bearer " + tok, "Content-Type": "application/json" },
+        body: JSON.stringify({ url: input.url, waitForTimeout: 5000 })
+      });
+      if (!br.ok) return { ok: false, error: "cf-browser " + br.status + ": " + (await br.text()).slice(0,200) };
+      const bd = await br.json();
+      const html = (bd.result || "").slice(0, 30000);
+      // strip tags for cleaner content
+      const text = html.replace(/<script[\s\S]*?<\/script>/gi,"").replace(/<style[\s\S]*?<\/style>/gi,"").replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim().slice(0,15000);
+      return { ok: true, url: input.url, text, html_size: html.length };
+    } catch(e) { return { ok: false, error: String(e.message || e) }; }
+  }
+  if (name === "pdf_extract") {
+    try {
+      // Use Cloudflare's PDF extraction via fetch — fallback to grabbing the PDF bytes and using a simple approach
+      const pr = await fetch(input.url);
+      if (!pr.ok) return { ok: false, error: "pdf fetch " + pr.status };
+      const buf = await pr.arrayBuffer();
+      // Use a simple regex-based extraction for text in PDF streams (works for many PDFs)
+      const text = new TextDecoder("latin1").decode(buf);
+      // Extract text inside parens of BT...ET blocks
+      const extracts = [];
+      const re = /\(((?:\\.|[^()\\])*)\)\s*Tj/g;
+      let m; let total = 0;
+      while ((m = re.exec(text)) && total < 50000) {
+        const t = m[1].replace(/\\(.)/g,"$1");
+        extracts.push(t);
+        total += t.length;
+      }
+      return { ok: true, url: input.url, text: extracts.join(" ").slice(0, 30000), bytes: buf.byteLength };
+    } catch(e) { return { ok: false, error: String(e.message || e) }; }
+  }
+
   try {
     if (name === "http_request") {
       const { url, method = "GET", headers = {}, body } = input || {};
