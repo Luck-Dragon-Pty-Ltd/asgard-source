@@ -1,5 +1,5 @@
 // asgard-ai v5.8.0-stream: multi-provider (Anthropic/OpenAI/Groq) streaming SSE, normalized tokens
-const VERSION = '6.15.0';
+const VERSION = '6.15.1';
 const WORKER_NAME = "asgard-ai";
 
 // --- PIN auth helper (v1.1.0 security patch) ---
@@ -2382,7 +2382,7 @@ const AGENTIC_TOOLS_OPENAI = [
     parameters: { type: "object", properties: {
       sheet_id: { type: "string", description: "Spreadsheet ID" },
       range: { type: "string", description: "A1 notation, e.g. Sheet1!A1" },
-      values: { type: "array", description: "2D array of cell values: [[row1cell1,row1cell2],[row2cell1,row2cell2]]" }
+      values: { type: "array", description: "2D array of cell values: [[row1cell1,row1cell2],[row2cell1,row2cell2]]", items: { type: "array", items: { type: "string" } } }
     }, required: ["sheet_id","range","values"] }
   }},
   { type: "function", function: {
@@ -2390,7 +2390,7 @@ const AGENTIC_TOOLS_OPENAI = [
     description: "Apply a Slides API batchUpdate to an existing presentation. Pass the requests array directly. Useful for adding slides, replacing text, etc.",
     parameters: { type: "object", properties: {
       presentation_id: { type: "string", description: "Presentation ID" },
-      requests: { type: "array", description: "Slides batchUpdate requests array per Slides API spec" }
+      requests: { type: "array", description: "Slides batchUpdate requests array per Slides API spec", items: { type: "object" } }
     }, required: ["presentation_id","requests"] }
   }}
 ];
