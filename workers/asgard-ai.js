@@ -1,5 +1,5 @@
 // asgard-ai v5.8.0-stream: multi-provider (Anthropic/OpenAI/Groq) streaming SSE, normalized tokens
-const VERSION = '6.16.0';
+const VERSION = '6.16.1';
 const WORKER_NAME = "asgard-ai";
 
 // --- PIN auth helper (v1.1.0 security patch) ---
@@ -3434,7 +3434,7 @@ async function handleChatAgentic(request, env) {
   const messagesIn = Array.isArray(body.messages) ? body.messages : [];
   let messages = [...messagesIn, { role: "user", content: message }];
 
-  const MAX_ITER = 12;
+  const MAX_ITER = 20;
   let iter = 0;
   const toolsExecuted = [];
   let usage = null;
