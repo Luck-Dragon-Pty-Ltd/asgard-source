@@ -1,5 +1,5 @@
 // asgard-ai v5.8.0-stream: multi-provider (Anthropic/OpenAI/Groq) streaming SSE, normalized tokens
-const VERSION = '6.17.5';
+const VERSION = '6.17.6';
 const WORKER_NAME = "asgard-ai";
 
 // --- PIN auth helper (v1.1.0 security patch) ---
@@ -1828,7 +1828,7 @@ function googleConsentUrl(env, request, account) {
     client_id: env.GOOGLE_CLIENT_ID,
     redirect_uri: callback,
     response_type: "code",
-    scope: "https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/presentations https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/gmail.send",
+    scope: "https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/calendar",
     access_type: "offline",
     prompt: isLD ? "select_account consent" : "consent",
     include_granted_scopes: "true",
@@ -3062,7 +3062,7 @@ async function agenticExecuteTool(name, input, env) {
       const j = await r.json();
       return { ok: true, message_id: j.id, channel_id: j.channel_id };
     }
-    // v6.17.5: Browser Rendering — use env.BROWSER binding instead of REST API (no token scope dance needed)
+    // v6.17.6: Browser Rendering — use env.BROWSER binding instead of REST API (no token scope dance needed)
     if (name === "browser_screenshot" || name === "browser_content" || name === "browser_markdown" || name === "browser_json" || name === "browser_links" || name === "browser_scrape" || name === "browser_pdf") {
       const ops = {
         browser_screenshot: { op: 'screenshot', body: { url: input.url, screenshotOptions: { fullPage: !!input.full_page } } },
