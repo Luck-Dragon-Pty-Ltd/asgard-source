@@ -417,7 +417,9 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   .composer .icon-btn { width: 42px !important; height: 42px !important; min-width: 42px; font-size: 19px; }
   .composer .send-btn { width: 48px !important; height: 48px !important; min-width: 48px; font-size: 18px; border-radius: 12px; }
   .messages { padding: 12px 12px 100px; gap: 10px; }
-  .msg-bubble { font-size: 15px !important; line-height: 1.5; padding: 10px 14px; max-width: 92%; }
+  .msg-bubble { font-size: 15px !important; line-height: 1.5; padding: 10px 14px; max-width: 88vw !important; overflow-wrap: anywhere; word-break: break-word; }
+  .msg-row.user .msg-bubble { max-width: 82vw !important; }
+  .msg-row.assistant .msg-bubble { max-width: 88vw !important; }
   .msg-role { font-size: 11px; }
   .msg-timestamp { font-size: 10px; }
   .home-panel { padding: 12px; gap: 12px; }
