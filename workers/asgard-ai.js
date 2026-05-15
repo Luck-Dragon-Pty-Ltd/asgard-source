@@ -1,5 +1,5 @@
 // asgard-ai v5.8.0-stream: multi-provider (Anthropic/OpenAI/Groq) streaming SSE, normalized tokens
-const VERSION = '6.17.1';
+const VERSION = '6.17.2';
 const WORKER_NAME = "asgard-ai";
 
 // --- PIN auth helper (v1.1.0 security patch) ---
@@ -3008,21 +3008,21 @@ async function agenticExecuteTool(name, input, env) {
       return { id: j.id, url: j.url, active: j.active };
     }
     if (name === "supabase_select") {
-      if (!env.SUPABASE_URL || !env.SUPABASE_KEY) return { error: "SUPABASE_URL or SUPABASE_KEY missing" };
+      if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_KEY) return { error: "SUPABASE_URL or SUPABASE_SERVICE_KEY missing" };
       const limit = (input && input.limit) || 50;
       const select = (input && input.select) || "*";
       const url = env.SUPABASE_URL.replace(/\/$/, "") + "/rest/v1/" + encodeURIComponent(input.table) + "?select=" + encodeURIComponent(select) + (input.query ? "&" + input.query : "") + "&limit=" + limit;
-      const r = await fetch(url, { headers: { "apikey": env.SUPABASE_KEY, "Authorization": "Bearer " + env.SUPABASE_KEY } });
+      const r = await fetch(url, { headers: { "apikey": env.SUPABASE_SERVICE_KEY, "Authorization": "Bearer " + env.SUPABASE_SERVICE_KEY } });
       if (!r.ok) return { error: "supabase " + r.status, detail: (await r.text()).slice(0, 300) };
       const j = await r.json();
       return { count: Array.isArray(j) ? j.length : 0, rows: j };
     }
     if (name === "supabase_insert") {
-      if (!env.SUPABASE_URL || !env.SUPABASE_KEY) return { error: "SUPABASE_URL or SUPABASE_KEY missing" };
+      if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_KEY) return { error: "SUPABASE_URL or SUPABASE_SERVICE_KEY missing" };
       const url = env.SUPABASE_URL.replace(/\/$/, "") + "/rest/v1/" + encodeURIComponent(input.table);
       const r = await fetch(url, {
         method: "POST",
-        headers: { "apikey": env.SUPABASE_KEY, "Authorization": "Bearer " + env.SUPABASE_KEY, "Content-Type": "application/json", "Prefer": "return=representation" },
+        headers: { "apikey": env.SUPABASE_SERVICE_KEY, "Authorization": "Bearer " + env.SUPABASE_SERVICE_KEY, "Content-Type": "application/json", "Prefer": "return=representation" },
         body: JSON.stringify(input.row)
       });
       if (!r.ok) return { error: "supabase " + r.status, detail: (await r.text()).slice(0, 300) };
