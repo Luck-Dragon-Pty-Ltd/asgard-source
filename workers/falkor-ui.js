@@ -206,6 +206,8 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .sidebar-search input{width:100%;padding:7px 10px 7px 30px;background:var(--input-bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;outline:none}
 .sidebar-search input:focus{border-color:var(--accent)}
 .sidebar-search-icon{position:absolute;left:9px;top:50%;transform:translateY(-50%);font-size:13px;color:var(--muted);pointer-events:none}
+.drive-search-btn{margin:0 10px 6px;padding:8px 12px;width:calc(100% - 20px);background:rgba(108,99,255,.1);border:1px solid rgba(108,99,255,.2);border-radius:8px;color:var(--muted);font-size:13px;cursor:pointer;display:flex;align-items:center;gap:8px;transition:background .15s,color .15s;box-sizing:border-box}
+.drive-search-btn:hover{background:rgba(108,99,255,.18);color:var(--text)}
 
 .convo-list{flex:1;overflow-y:auto;overflow-x:hidden;padding:2px 6px;box-sizing:border-box}
 .convo-item{display:flex;align-items:center;gap:6px;padding:9px 10px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--text);transition:background .1s;position:relative;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;min-width:0;max-width:100%;box-sizing:border-box}
