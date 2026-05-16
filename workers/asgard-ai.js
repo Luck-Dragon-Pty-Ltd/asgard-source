@@ -1,5 +1,5 @@
 // asgard-ai v5.8.0-stream: multi-provider (Anthropic/OpenAI/Groq) streaming SSE, normalized tokens
-const VERSION = '6.17.7';
+const VERSION = '6.17.8';
 const WORKER_NAME = "asgard-ai";
 
 // --- PIN auth helper (v1.1.0 security patch) ---
@@ -3062,7 +3062,7 @@ async function agenticExecuteTool(name, input, env) {
       const j = await r.json();
       return { ok: true, message_id: j.id, channel_id: j.channel_id };
     }
-    // v6.17.7: Browser Rendering — use env.BROWSER binding instead of REST API (no token scope dance needed)
+    // v6.17.8: Browser Rendering — use env.BROWSER binding instead of REST API (no token scope dance needed)
     if (name === "browser_screenshot" || name === "browser_content" || name === "browser_markdown" || name === "browser_json" || name === "browser_links" || name === "browser_scrape" || name === "browser_pdf") {
       const ops = {
         browser_screenshot: { op: 'screenshot', body: { url: input.url, screenshotOptions: { fullPage: !!input.full_page } } },
@@ -3076,12 +3076,20 @@ async function agenticExecuteTool(name, input, env) {
       const cfg = ops[name];
       let r;
       if (env.BROWSER && env.BROWSER.fetch) {
-        // Use binding (no token needed)
-        r = await env.BROWSER.fetch("https://browser/" + cfg.op, {
+        // Use binding - CF Browser Rendering REST endpoint via binding (binding provides auth)
+        const _br_url = "https://api.cloudflare.com/client/v4/accounts/" + (env.CF_ACCOUNT_ID || "a6f47c17811ee2f8b6caeb8f38768c20") + "/browser-rendering/" + cfg.op;
+        r = await env.BROWSER.fetch(_br_url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(cfg.body)
         });
+        // If binding-mode failed with auth, fall through to REST + token
+        if (!r.ok && r.status === 401) {
+          const tok = env.CF_API_TOKEN_FULLOPS || env.CF_API_TOKEN;
+          if (tok) {
+            r = await fetch(_br_url, { method: "POST", headers: { "Content-Type": "application/json", "Authorization": "Bearer " + tok }, body: JSON.stringify(cfg.body) });
+          }
+        }
       } else {
         // Fallback to REST API
         const tok = env.CF_API_TOKEN_FULLOPS || env.CF_API_TOKEN;
