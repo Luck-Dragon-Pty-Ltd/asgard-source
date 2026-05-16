@@ -1,5 +1,5 @@
 // asgard-ai v5.8.0-stream: multi-provider (Anthropic/OpenAI/Groq) streaming SSE, normalized tokens
-const VERSION = '6.17.9';
+const VERSION = '6.17.10';
 const WORKER_NAME = "asgard-ai";
 
 // --- PIN auth helper (v1.1.0 security patch) ---
@@ -3062,7 +3062,7 @@ async function agenticExecuteTool(name, input, env) {
       const j = await r.json();
       return { ok: true, message_id: j.id, channel_id: j.channel_id };
     }
-    // v6.17.9: Browser Rendering — use env.BROWSER binding instead of REST API (no token scope dance needed)
+    // v6.17.10: Browser Rendering — use env.BROWSER binding instead of REST API (no token scope dance needed)
     if (name === "browser_screenshot" || name === "browser_content" || name === "browser_markdown" || name === "browser_json" || name === "browser_links" || name === "browser_scrape" || name === "browser_pdf") {
       const ops = {
         browser_screenshot: { op: 'screenshot', body: { url: input.url, screenshotOptions: { fullPage: !!input.full_page } } },
@@ -3101,15 +3101,29 @@ async function agenticExecuteTool(name, input, env) {
           body: JSON.stringify(cfg.body)
         });
       }
-      // Jina Reader fallback — works without any auth, returns clean markdown of JS-rendered page
+      // v6.17.10: 3-tier fallback when CF Browser Rendering is unavailable
       if (!r.ok && (name === "browser_content" || name === "browser_markdown")) {
+        // Tier 1: Jina Reader (free, no auth, JS-rendered)
         try {
           const jr = await fetch("https://r.jina.ai/" + input.url, { headers: { "Accept": "text/plain" } });
           if (jr.ok) {
             const text = (await jr.text()).slice(0, 30000);
-            return { ok: true, url: input.url, result: text, source: "jina-reader-fallback" };
+            return { ok: true, url: input.url, result: text, source: "jina-reader" };
           }
-        } catch (je) { /* fall through to original error */ }
+        } catch (je) {}
+        // Tier 2: Plain fetch (works for static HTML, no JS rendering)
+        try {
+          const dr = await fetch(input.url, { headers: { "User-Agent": "Mozilla/5.0 (compatible; Asgard-Falkor/1.0)" } });
+          if (dr.ok) {
+            const html = (await dr.text()).slice(0, 30000);
+            let result = html;
+            if (name === "browser_markdown") {
+              // Strip tags for markdown-like output
+              result = html.replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 30000);
+            }
+            return { ok: true, url: input.url, result, source: "plain-fetch", note: "JS not rendered" };
+          }
+        } catch (fe) {}
       }
       if (!r.ok) return { error: "browser " + r.status, detail: (await r.text()).slice(0, 500) };
       const ct = r.headers.get("Content-Type") || "";
