@@ -164,14 +164,14 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 
 /* ── Login ── */
 .login-wrap{display:flex;align-items:center;justify-content:center;height:100dvh;background:var(--bg)}
-.login-card{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:40px 36px;width:100%;max-width:380px;box-shadow:var(--shadow)}
+.login-card{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:clamp(20px,5vw,40px);width:100%;max-width:380px;box-shadow:var(--shadow)}
 .login-logo{font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:6px;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
 .login-sub{color:var(--muted);font-size:14px;margin-bottom:28px}
 .field{display:flex;flex-direction:column;gap:6px;margin-bottom:16px}
 .field label{font-size:13px;color:var(--muted);font-weight:500}
-.field input{background:var(--input-bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:15px;padding:10px 14px;outline:none;transition:border .15s}
+.field input{background:var(--input-bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:16px;padding:12px 14px;outline:none;transition:border .15s;min-height:44px}
 .field input:focus{border-color:var(--accent)}
-.btn{width:100%;padding:11px;border:none;border-radius:9px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;font-size:15px;font-weight:600;cursor:pointer;transition:opacity .15s;letter-spacing:.01em}
+.btn{width:100%;padding:14px;border:none;border-radius:9px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;font-size:16px;font-weight:600;cursor:pointer;transition:opacity .15s;letter-spacing:.01em;min-height:48px;display:flex;align-items:center;justify-content:center;border:none;border-radius:9px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;font-size:15px;font-weight:600;cursor:pointer;transition:opacity .15s;letter-spacing:.01em}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .btn:not(:disabled):hover{opacity:.88}
 .btn-ghost{background:transparent;border:1px solid var(--border);color:var(--text)}
@@ -446,6 +446,33 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   .composer textarea { font-size: 15px; }
   .composer .send-btn { width: 44px; height: 44px; }
 }
+@media(max-width:600px){
+  body{font-size:16px}
+  .login-card{padding:clamp(16px,4vw,28px);width:calc(100% - 20px);margin:0 10px}
+  .login-logo{font-size:24px;margin-bottom:8px}
+  .login-sub{font-size:13px;margin-bottom:20px}
+  .field{margin-bottom:14px}
+  .field label{font-size:13px;margin-bottom:6px}
+  .field input{font-size:16px;padding:12px 12px}
+  .btn{padding:14px;font-size:15px;border-radius:8px}
+  .user-select{height:100dvh;gap:16px;padding:16px}
+  .user-card{padding:16px 20px;min-width:100px}
+  .avatar{font-size:36px;margin-bottom:8px}
+  .uname{font-size:15px}
+  .urole{font-size:11px}
+  .chat-wrap{padding:0;border-radius:0;overflow:hidden}
+  .chat-input{padding:12px;font-size:16px;min-height:44px;width:100%;font-size:15px;min-height:44px}
+  .chat-bubble{padding:10px 12px;font-size:14px;border-radius:12px;margin:8px 0}
+}
+
+@media(max-width:400px){
+  .login-card{width:calc(100% - 16px);margin:0 8px}
+  .user-select{padding:12px;gap:12px}
+  .user-card{padding:12px 16px;min-width:80px}
+  .avatar{font-size:32px}
+  .uname{font-size:14px}
+}
+
 
 </style>
 </head>
