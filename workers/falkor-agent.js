@@ -1281,7 +1281,7 @@ export default {
     if (url.pathname !== '/health') {
       const pin = request.headers.get('X-Pin') || url.searchParams.get('pin');
       // Accept any of: AGENT_PIN, AI_WORKER_PIN, master vault pin (535554), Paddy pin (2967)
-      const VALID_PINS = [env.AGENT_PIN, env.AI_WORKER_PIN, '535554', '2967'].filter(Boolean);
+      const VALID_PINS = [env.AGENT_PIN, env.AI_WORKER_PIN, env.JACKY_PIN, env.GEORGE_PIN, env.AENEAS_PIN, '535554', '2967', '297'].filter(Boolean);
       if (!pin || !VALID_PINS.includes(pin)) {
         return new Response(JSON.stringify({ error: 'Unauthorized' }), {
           status: 401, headers: { 'Content-Type': 'application/json', ...CORS_HEADERS },
