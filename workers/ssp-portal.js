@@ -235,10 +235,22 @@ async function _innerFetch(request, env, ctx) {
     }
 
     const GH_BASE = "https://raw.githubusercontent.com/LuckDragonAsgard/schoolsportportal/main";
-    const ghPages = ["/williamstowndistrict.html", "/hobsonsbaydivision.html"];
+    const ghPages = ["/williamstowndistrict.html", "/hobsonsbaydivision.html", "/wyndhamdivision.html"];
     
     let normPath = path;
-    if (!normPath.includes(".") && normPath !== "/") {
+    // Canonical hierarchical aliases → flat ghPages filenames
+    const CANONICAL_TO_GH = {
+      '/district/primary/williamstown': '/williamstowndistrict.html',
+      '/district/williamstown': '/williamstowndistrict.html',
+      '/division/primary/hobsonsbay': '/hobsonsbaydivision.html',
+      '/division/hobsonsbay': '/hobsonsbaydivision.html',
+      '/division/primary/wyndham': '/wyndhamdivision.html',
+      '/division/wyndham': '/wyndhamdivision.html',
+      '/wyndhamdivision': '/wyndhamdivision.html'
+    };
+    if (CANONICAL_TO_GH[path]) {
+      normPath = CANONICAL_TO_GH[path];
+    } else if (!normPath.includes(".") && normPath !== "/") {
       normPath = normPath + ".html";
     }
 
