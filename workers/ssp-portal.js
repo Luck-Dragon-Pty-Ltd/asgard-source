@@ -272,10 +272,10 @@ async function _innerFetch(request, env, ctx) {
     }
 
         // Williamstown PS and Hobsons Bay â embedded directly
-    if (path === '/williamstownprimary' || normPath === '/williamstownprimary.html' || normPath === '/williamstownps.html') {
+    if (path === '/williamstownprimary' || path === '/school/primary/williamstown' || normPath === '/williamstownprimary.html' || normPath === '/williamstownps.html') {
       return new Response(WPS_HTML, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'public, max-age=300', 'X-Source': 'embedded-wps' } });
     }
-    if (path === '/hobsonsbay' || path === '/hobsonsbaydivision' || normPath === '/hobsonsbaydivision.html' || normPath === '/hobsonsbay.html') {
+    if (path === '/hobsonsbay' || path === '/hobsonsbaydivision' || path === '/division/primary/hobsonsbay' || path === '/hobsonsbaydivision' || normPath === '/hobsonsbaydivision.html' || normPath === '/hobsonsbay.html') {
       return new Response(HOBSONS_HTML, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'public, max-age=300', 'X-Source': 'embedded-hobsons' } });
     }
 
