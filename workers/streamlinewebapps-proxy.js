@@ -477,7 +477,7 @@ export default {
 
     const cors = corsFor(request);
     if (request.method === "OPTIONS") return new Response(null, {status:204, headers:cors});
-    if (path === "/health") return new Response(JSON.stringify({ok:true,version:43,sha:"og-png-real-2026-05-06"}), {headers:{...cors,...SEC_HEADERS,"Content-Type":"application/json"}});
+    if (path === "/health") return new Response(JSON.stringify({ok:true,version:43,sha:"og-png-real-2026-05-06-falkor-tested-20260518"}), {headers:{...cors,...SEC_HEADERS,"Content-Type":"application/json"}});
     if (path === "/og.png") {
       const bin = atob(OG_PNG_B64);
       const buf = new Uint8Array(bin.length);
